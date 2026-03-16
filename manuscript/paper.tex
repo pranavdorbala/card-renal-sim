@@ -1,0 +1,389 @@
+\documentclass[pmlr]{jmlr}
+
+\RequirePackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+
+\makeatletter
+\def\set@curr@file#1{\def\@curr@file{#1}}
+\makeatother
+\usepackage[load-configurations=version-1]{siunitx}
+
+\theorembodyfont{\upshape}
+\theoremheaderfont{\scshape}
+\theorempostheader{:}
+\theoremsep{\newline}
+\newtheorem*{note}{Note}
+
+\jmlrvolume{[VOLUME \# TBD]}
+\jmlryear{2025}
+\jmlrworkshop{Machine Learning for Healthcare}
+
+\title[Simulation-Based Digital Twins for Cardiorenal Disease]{Simulation-Based Digital Twins for Cardiorenal Disease Progression via Agentic Message Passing}
+
+\author{\Name{Pranav Dorbala}
+       \Email{dorbala2@illinois.edu}\\
+       \addr Department of Electrical and Computer Engineering\\
+       University of Illinois Urbana Champaign\\
+       Urbana, IL, USA}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Heart failure with preserved ejection fraction (HFpEF) presents a fundamental modeling challenge: patients maintain normal systolic function while experiencing progressive multi-organ deterioration driven by tightly coupled feedback loops among the heart, kidneys, and vasculature. We present a simulation-based digital twin framework that addresses three core requirements for modeling this disease. First, we construct a mechanistic cardiorenal simulator coupling the CircAdapt cardiovascular model with a Hallow et al.\ (2017) renal physiology module via structured bidirectional message passing, transmitting five hemodynamic signals (MAP, CO, CVP, blood volume, SVR) between organ subsystems at each time step. Second, we develop a synthetic data generation pipeline that maps coupled simulator states to 113 clinical variables matching the ARIC echocardiographic and renal measurement protocol, producing paired Visit~5/Visit~7 trajectories for training a residual neural network that predicts six-year disease progression. Third, we introduce an agentic LLM-based inference engine that uses tool-calling over the mechanistic simulator to recover individualized disease parameters from clinical observations, producing interpretable parameter policies and mechanistic explanations. The framework includes a counterfactual decomposition that attributes each organ's deterioration rate to three drivers: its own disease state, the other organ's current state, and the other organ's rate of decline. Together, these components form an integrated system bridging mechanistic cardiorenal physiology with modern machine learning for interpretable, individualized, and dynamically updating predictions of HFpEF progression.
+\end{abstract}
+
+%% ═══════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+%% ═══════════════════════════════════════════════════════════════════════════
+
+Heart failure with preserved ejection fraction poses a unique modeling challenge because patients maintain normal systolic function while experiencing progressive multi-organ deterioration that is not captured by any single biomarker. The disease emerges from tightly coupled feedback loops among the heart, kidneys, and vasculature, where the directionality of organ-to-organ influence shifts over time. Clinical observations---such as natriuretic peptide levels, glomerular filtration rate, and diastolic function indices---are noisy and reflect only partial views of the underlying disease state. As a result, faithfully representing HFpEF progression requires frameworks capable of modeling a high-dimensional, partially observable system of interacting organ dynamics, which remains an open and active area of research.
+
+Firstly, the model must encode longitudinal clinical measurements from both cardiac and renal systems into a shared latent representation of the patient's joint cardiorenal state. This representation compresses high-dimensional, multimodal clinical data into a compact summary that captures the underlying disease status.
+
+Secondly, the model must learn the time-varying, bidirectional causal relationships between these two organ systems, capturing how cardiac dysfunction drives renal impairment and vice versa at different stages of disease. This learned structure must be dynamic, allowing the direction and strength of organ-to-organ influence to shift as the patient's condition evolves, because the dominant mechanism of deterioration in cardiorenal disease is not fixed and changes with disease stage, treatment response, and comorbidity burden.
+
+Lastly, from this foundation, the model generates individualized forward-looking trajectories that integrate the learned latent state with the discovered causal structure. The model can additionally refine these trajectories as new clinical data arrives, enabling continuous prediction rather than reliance on a single baseline assessment. The trajectories take the form of predicted temporal sequences over both observable clinical variables and inferred latent disease states that govern the joint evolution of the cardiorenal system. Observable predictions include future values of echocardiographic structure and function measures, natriuretic peptide levels, and renal filtration markers. Latent predictions capture hidden disease dynamics such as subclinical congestion, early fibrotic remodeling, and silent hemodynamic compromise that precede overt clinical deterioration. Together, the observable and latent projections provide a complete, dynamically updating picture of where a patient has been, where they are, and where they are heading.
+
+To address these objectives, we propose a simulation-based digital twin framework for cardiorenal disease progression in HFpEF. We address these in three main contributions:
+
+\begin{enumerate}
+\item \textbf{Inferring the joint cardiorenal state.} We introduce a mechanistically informed state-space model that jointly represents cardiac and renal physiology as coupled dynamical systems, encoding known pathophysiological relationships as structural priors while allowing data-driven refinement of unknown interaction parameters. This formulation produces the shared latent representation described above, compressing noisy clinical measurements into a compact, informative disease state.
+
+\item \textbf{Learning time-varying, bidirectional causal relationships.} We develop a reinforcement learning-based inference engine that operates over the state-space model, learning to estimate which direction of organ-to-organ influence best explains the observed data at each point in a patient's disease course. Because the dominant mechanism of cardiorenal deterioration shifts with disease stage, treatment response, and comorbidity burden, the model dynamically updates its causal estimates rather than relying on a fixed structure. This component enables the model to distinguish, for example, periods in which renal congestion is driving cardiac decompensation from periods in which primary cardiac stiffening is impairing renal perfusion.
+
+\item \textbf{Generating and validating individualized forward trajectories.} We construct a simulation environment that generates synthetic but physiologically plausible cardiorenal trajectories, serving as both a pretraining substrate and an evaluation platform. This environment allows the model to learn disease dynamics in settings where real-world longitudinal data is sparse or incomplete, and to stress-test its predictions against known clinical failure modes. The resulting trajectories span both observable clinical variables and latent disease states, providing the complete temporal picture of disease evolution that current clinical tools do not offer.
+\end{enumerate}
+
+Together, these three components form an integrated system that bridges mechanistic cardiorenal physiology with modern machine learning, delivering the interpretable, individualized, and dynamically updating predictions needed to shift HFpEF management from reactive care to anticipatory intervention.
+
+\subsection*{Generalizable Insights about Machine Learning in the Context of Healthcare}
+
+This work offers several insights for machine learning in healthcare:
+
+\begin{itemize}
+\item \textbf{Mechanistic simulators as data engines.} When longitudinal clinical data is sparse---as in slow-progressing diseases like HFpEF---coupling physiological simulators with emission functions that map latent states to realistic clinical measurements provides an unlimited, controllable pretraining substrate. The key insight is that the simulator need not be perfectly calibrated; it need only span the plausible phenotypic space.
+
+\item \textbf{Agentic inference over structured tools.} Rather than training an end-to-end inverse model, we show that LLMs equipped with tool-calling capabilities can perform iterative parameter recovery over a mechanistic simulator, naturally producing interpretable explanations alongside quantitative estimates. This agent-simulator pattern is broadly applicable to any domain where a forward model exists but the inverse problem is ill-posed.
+
+\item \textbf{Counterfactual decomposition for causal attribution.} By running coupled and uncoupled simulations in parallel, one can decompose observed deterioration into contributions from each organ's own disease versus cross-organ feedback---providing the kind of mechanistic interpretability that clinicians need to guide treatment decisions in multi-organ disease.
+\end{itemize}
+
+
+%% ═══════════════════════════════════════════════════════════════════════════
+\section{Related Work}
+%% ═══════════════════════════════════════════════════════════════════════════
+
+\textbf{Cardiovascular simulation.}
+Lumped-parameter cardiovascular models have a long history, from the Guyton whole-body model~\citep{guyton1972} to modern finite-element approaches. The CircAdapt framework~\citep{arts2005,walmsley2015,vanosta2024} provides a physiologically detailed, real-time cardiovascular simulator incorporating sarcomere mechanics, ventricular interaction via the TriSeg model, and pericardial constraint. We build on the VanOsta2024 implementation, which has been validated against clinical echocardiographic data and used to study heart failure phenotypes.
+
+\textbf{Renal physiology models.}
+Computational kidney models range from detailed nephron-level simulations~\citep{weinstein2007} to whole-organ representations suitable for systems pharmacology. Hallow et al.~\citep{hallow2017} developed a model of renal hemodynamics, tubuloglomerular feedback, RAAS, and sodium handling that has been used to study antihypertensive drug response. We adapt this model for coupling with CircAdapt.
+
+\textbf{Cardiorenal coupling.}
+Basu et al.~\citep{basu2023} demonstrated bidirectional coupling between a Guyton-derived cardiovascular model and a renal module, showing that coupled dynamics amplify disease progression beyond what either organ model predicts alone. Our work extends this approach by using the full CircAdapt model, adding an emission layer for clinical variable generation, and introducing an agentic inference framework.
+
+\textbf{Digital twins in medicine.}
+The digital twin concept---a patient-specific computational model updated with real-time data---has been applied in cardiology for surgical planning~\citep{corral2020} and arrhythmia prediction. Our framework extends this paradigm to multi-organ disease progression, where the twin must capture not just cardiac mechanics but bidirectional cardiorenal feedback.
+
+\textbf{LLM-based scientific agents.}
+Recent work has demonstrated that large language models equipped with tool-calling can perform iterative scientific reasoning~\citep{boiko2023}, including experimental design and parameter optimization. Our agentic framework applies this paradigm to mechanistic model calibration, where the LLM acts as a domain-expert optimizer over a physiological simulator.
+
+
+%% ═══════════════════════════════════════════════════════════════════════════
+\section{Methods}
+\label{sec:methods}
+%% ═══════════════════════════════════════════════════════════════════════════
+
+Our framework consists of five integrated components: (1)~a cardiac subsystem built on CircAdapt, (2)~a renal subsystem implementing Hallow et al.\ (2017), (3)~a bidirectional message-passing coupling architecture, (4)~a clinical emission layer mapping simulator states to ARIC variables, and (5)~an agentic LLM-based inference engine for parameter recovery. We describe each in turn.
+
+\subsection{Problem Formulation}
+\label{sec:formulation}
+
+We formulate cardiorenal disease progression as a \emph{coupled dynamical system} over discrete time steps $t = 1, \dots, T$. Let $\mathbf{h}_t$ denote the cardiac state (ventricular volumes, pressures, ejection fraction, fiber mechanics) and $\mathbf{r}_t$ the renal state (glomerular filtration rate, blood volume, sodium balance, RAAS activation). Each subsystem advances using its own dynamics and messages received from the other:
+\begin{align}
+\mathbf{h}_{t+1} &= f_H\!\bigl(\mathbf{h}_t,\; \mathbf{m}_{t}^{K \to H},\; \theta_t^H\bigr) \label{eq:heart}\\
+\mathbf{r}_{t+1} &= f_K\!\bigl(\mathbf{r}_t,\; \mathbf{m}_{t}^{H \to K},\; \theta_t^K\bigr) \label{eq:kidney}
+\end{align}
+where $\theta_t^H$ and $\theta_t^K$ are time-varying disease parameters, and the message vectors are:
+\begin{align}
+\mathbf{m}^{H \to K}_t &= \bigl[\text{MAP}_t,\; \text{CO}_t,\; \text{CVP}_t\bigr]^\top \label{eq:h2k}\\
+\mathbf{m}^{K \to H}_t &= \bigl[V_{\text{blood},t},\; \text{SVR}_t\bigr]^\top \label{eq:k2h}
+\end{align}
+A coupling intensity $\alpha$ modulates every message:
+\begin{equation}
+\hat{m}_i = m_i^{(0)} + \alpha \cdot \bigl(m_i - m_i^{(0)}\bigr)
+\label{eq:alpha}
+\end{equation}
+where $m_i^{(0)}$ is the healthy baseline. Setting $\alpha = 0$ decouples the organs; $\alpha = 1$ recovers normal physiology; $\alpha > 1$ amplifies the feedback.
+
+\subsection{Cardiac Subsystem: CircAdapt VanOsta2024}
+\label{sec:heart}
+
+Unlike simplified time-varying elastance models that represent the ventricle as a single pressure-volume relationship, the cardiac subsystem is built on the CircAdapt framework~\citep{vanosta2024}, a modular cardiovascular simulator that models the full closed-loop circulation with physiological detail at the level of sarcomere mechanics.
+
+\textbf{Sarcomere mechanics.} Each myocardial wall segment (LV free wall, septum, RV free wall) is modeled as a contractile patch with active fiber stress $S_{f,\text{act}}$ governed by a Hill-type cross-bridge cycling model. The active stress depends on sarcomere length, contraction velocity, and time since activation, producing realistic Frank-Starling behavior where increased preload leads to increased contractile force. Passive fiber stress arises from an exponential stress-strain relationship parameterized by the stiffness coefficient $k_1$:
+\begin{equation}
+S_{f,\text{pas}} = k_1 \bigl(e^{\,k_2\,(\lambda - 1)} - 1\bigr)
+\label{eq:passive}
+\end{equation}
+where $\lambda$ is the fiber stretch ratio. This exponential passive stiffness directly captures HFpEF diastolic dysfunction: increasing $k_1$ produces elevated filling pressures at the same end-diastolic volume---the hemodynamic hallmark of HFpEF.
+
+\textbf{Ventricular interaction.} The TriSeg model~\citep{lumens2009} couples the LV free wall, septum, and RV free wall mechanically through a shared septal geometry, capturing interventricular dependence. This is essential for cardiorenal modeling because RV dysfunction from pulmonary hypertension (a consequence of chronic LV diastolic dysfunction) directly affects systemic venous pressure and renal perfusion.
+
+\textbf{Closed-loop circulation.} The model includes four cardiac cavities, four valves, systemic and pulmonary arterial and venous compartments, and a pericardial constraint. Arterial compliance is modeled via Tube0D elements with a nonlinear pressure-volume relationship parameterized by stiffness coefficient $k$. The systemic arteriovenous bed uses a pressure-flow relationship:
+\begin{equation}
+q = \text{sign}(\Delta p) \cdot q_0 \cdot (|\Delta p| / p_0)^k
+\label{eq:artven}
+\end{equation}
+where $p_0$ sets the resistance operating point. This is the parameter through which renal-driven SVR changes are imposed on the heart.
+
+\textbf{Disease parameters.} One primary cardiac disease parameter is exposed:
+\begin{itemize}
+%\item $S_{f,\text{act}}^{\text{scale}}$: scales the active fiber stress reference on LV and septal patches. Values below 1.0 reduce contractility, modeling HFrEF.
+\item $k_1^{\text{scale}}$: scales the passive myocardial stiffness on LV and septal patches. Values above 1.0 increase diastolic stiffness, modeling HFpEF.
+\end{itemize}
+Additional modifiers include an inflammatory state model that adjusts arterial stiffness (Tube0D $k$), SVR operating point ($p_0$), and passive myocardial stiffness ($k_1$) based on continuous inflammation and diabetes burden scales.
+
+\textbf{Steady-state solution.} At each coupling step, CircAdapt is run to hemodynamic stability using its built-in pressure-flow control (PFC) module, which adjusts circulating volume to reach the target set by the renal model. The solver iterates multiple cardiac cycles until pressures and volumes converge, then stores one clean beat for waveform extraction. This yields MAP, SBP, DBP, CO, SV, EF, EDV, ESV, CVP, and full pressure-volume loop waveforms.
+
+\subsection{Renal Subsystem: Hallow et al.\ (2017)}
+\label{sec:kidney}
+
+The kidney module implements the mechanistic renal model of Hallow et al.~\citep{hallow2017}, capturing glomerular hemodynamics, tubuloglomerular feedback, RAAS, and tubular sodium handling.
+
+\textbf{RAAS.} The renin-angiotensin-aldosterone system responds to MAP deviation from a homeostatic setpoint:
+\begin{equation}
+\text{RAAS} = \text{clip}\bigl(1 - g_R \cdot 0.005 \cdot \Delta\text{MAP},\; 0.5,\; 2.0\bigr)
+\label{eq:raas}
+\end{equation}
+This factor modulates efferent arteriolar resistance $R_{\text{EA}} = R_{\text{EA}}^{(0)} \cdot \text{RAAS}$ and collecting duct sodium reabsorption $\eta_{\text{CD}} = \eta_{\text{CD}}^{(0)} \cdot \text{RAAS}$. Critically, the RAAS factor also feeds back as part of the SVR message to the heart: elevated RAAS drives systemic vasoconstriction.
+
+\textbf{Tubuloglomerular feedback (TGF).} An iterative fixed-point solver (20 iterations with damped updates) equilibrates afferent arteriolar resistance $R_{\text{AA}}$ based on macula densa sodium delivery:
+\begin{equation}
+R_{\text{AA}}^{(k+1)} = R_{\text{AA}}^{(0)} \Bigl(1 + g_{\text{TGF}} \cdot \frac{\text{MD}_{\text{Na}}^{(k)} - \text{MD}_{\text{Na}}^{*}}{\text{MD}_{\text{Na}}^{*}}\Bigr)
+\label{eq:tgf}
+\end{equation}
+Glomerular capillary pressure, renal blood flow, and single-nephron GFR are simultaneously determined:
+\begin{align}
+\text{RBF} &= \frac{\text{MAP} - P_{\text{ven}}}{R_{\text{pre}} + R_{\text{AA}} + R_{\text{EA}}} \cdot 10^3 \label{eq:rbf}\\
+P_{\text{gc}} &= \text{MAP} - \text{RBF} \cdot (R_{\text{pre}} + R_{\text{AA}}) / 10^3 \label{eq:pgc}\\
+\text{SNGFR} &= K_f \cdot K_f^{\text{scale}} \cdot \text{NFP} \label{eq:sngfr}
+\end{align}
+where $\text{NFP} = P_{\text{gc}} - P_{\text{Bow}} - \bar{\pi}$ is the net filtration pressure, $K_f^{\text{scale}} \leq 1$ is the CKD disease parameter representing nephron loss, and total $\text{GFR} = 2N \cdot \text{SNGFR}$.
+
+\textbf{Tubular handling and volume balance.} Filtered sodium traverses four sequential tubular segments (proximal tubule, loop of Henle, distal tubule, collecting duct) with fractional reabsorption rates, modulated by pressure natriuresis. The intake--excretion difference for sodium and water updates total body sodium and blood volume $V_{\text{blood}}$ over each time step $\Delta t$.
+
+\subsection{Coupling Architecture}
+\label{sec:coupling}
+
+Algorithm~\ref{alg:coupling} details the message-passing loop. At each step, the cardiac model receives the kidney's most recent blood volume and SVR, runs CircAdapt to steady state, and transmits three $\alpha$-scaled hemodynamic messages to the kidney. The kidney advances its state and returns updated volume and resistance.
+
+\begin{algorithm}[t]
+\caption{Coupled Cardiorenal Simulation}\label{alg:coupling}
+\begin{algorithmic}[1]
+\small
+\STATE \textbf{Input:} Disease schedules $\{\theta_t^H\}_{t=1}^T$, $\{\theta_t^K\}_{t=1}^T$; coupling $\alpha$; time step $\Delta t$
+\STATE Initialize CircAdapt model $\mathcal{H}$; Hallow renal state $\mathbf{r}_0$
+\STATE Pre-equilibrate TGF setpoint with 5 renal updates at baseline
+\STATE $V_b \leftarrow 5000$ mL;\enspace $R_r \leftarrow 1.0$;\enspace store baselines at $t\!=\!1$
+\FOR{$t = 1$ \TO $T$}
+    \STATE Apply disease: $\mathcal{H}$.apply\_deterioration($S_f^{\text{scale}}$), $\mathcal{H}$.apply\_stiffness($k_1^{\text{scale}}$)
+    \STATE Apply inflammatory modifiers to $\mathcal{H}$ (arterial stiffness, SVR, $k_1$)
+    \STATE $\mathcal{H}$.apply\_kidney\_feedback($V_b$, $R_r$) \hfill\COMMENT{Kidney $\to$ Heart}
+    \STATE $\mathbf{h}_t \leftarrow \mathcal{H}$.run\_to\_steady\_state() \hfill\COMMENT{CircAdapt solver}
+    \STATE Scale: $\widehat{\text{MAP}} \leftarrow \text{MAP}^{(0)} + \alpha(\text{MAP}_t - \text{MAP}^{(0)})$ \hfill\COMMENT{Eq.~\ref{eq:alpha}}
+    \STATE $\widehat{\text{CO}},\;\widehat{\text{CVP}}$ analogously
+    \STATE $\mathbf{r}_t \leftarrow f_K(\mathbf{r}_{t-1},\, \widehat{\text{MAP}},\, \widehat{\text{CO}},\, \widehat{\text{CVP}},\, \Delta t)$ \hfill\COMMENT{Hallow model}
+    \STATE $\text{SVR}_t \leftarrow \text{RAAS}_t \cdot (1 + 0.4\,(1 - K_{f,t}^{\text{scale}}))$ \hfill\COMMENT{Heart $\to$ Kidney}
+    \STATE $R_r \leftarrow 1 + \alpha(\text{SVR}_t - 1)$;\enspace $V_b \leftarrow \mathbf{r}_t.V_{\text{blood}}$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+The SVR message (line~13) composes two renal pathology signals: RAAS-mediated vasoconstriction (a neurohormonal response to low MAP) and CKD-driven vascular stiffening ($0.4 \cdot (1 - K_f^{\text{scale}})$, representing the chronic structural effects of nephron loss on the vasculature). In the CircAdapt model, the SVR change is implemented by scaling the systemic ArtVen $p_0$ parameter (Eq.~\ref{eq:artven}), which modifies the pressure-flow operating point of the systemic bed.
+
+\subsection{Diabetes as a Shared Metabolic Driver}
+\label{sec:diabetes}
+
+The hemodynamic message-passing loop described in Section~\ref{sec:coupling} represents the primary axis of cardiorenal coupling. However, many patients with HFpEF have comorbid type~2 diabetes mellitus, which creates a \emph{second, metabolic axis of cross-organ coupling} that operates through distinct but synergistic pathways. Unlike organ-specific disease parameters ($k_1^{\text{scale}}$ for the heart, $K_f^{\text{scale}}$ for the kidney), diabetes simultaneously modifies both subsystems through an inflammatory mediator layer, making it a shared driver of cardiorenal deterioration.
+
+We model diabetes as a continuous metabolic burden index $d \in [0, 1]$ that modulates both cardiac and renal parameters through an \texttt{InflammatoryState} mediator object (Table~\ref{tab:diabetes}). This mediator is evaluated once per coupling step and its effects are applied to both organ models before the hemodynamic loop executes, such that diabetic pathology compounds with---rather than replaces---the hemodynamic coupling.
+
+\begin{table}[t]
+\centering
+\caption{Diabetes-mediated effects on cardiac and renal subsystems. Each pathway modifies the relevant parameter multiplicatively (cardiac) or additively (renal tubular), parameterized by diabetes burden $d \in [0,1]$. Inflammatory effects ($i \in [0,1]$) compose multiplicatively with diabetic effects where both are present.}
+\label{tab:diabetes}
+\small
+\begin{tabular}{p{3.2cm}p{3.5cm}p{4.5cm}}
+\toprule
+\textbf{Pathway} & \textbf{Modifier} & \textbf{Mechanism} \\
+\midrule
+\multicolumn{3}{l}{\emph{Cardiac effects}} \\[2pt]
+AGE collagen cross-linking & $k_1 \times (1 + 0.40\,d)$ & Myocardial fibrosis, diastolic stiffening~\citep{vanheerebeek2008} \\
+AGE arterial stiffening & $k_{\text{art}} \times (1 + 0.50\,d)$ & Elastin glycation, PWV increase~\citep{prenner2015} \\
+Diabetic cardiomyopathy & $S_{f,\text{act}} \times (1 - 0.20\,d)$ & Lipotoxicity, mitochondrial dysfunction~\citep{bugger2014} \\
+Microvascular rarefaction & $p_0 \times (1 + 0.10\,d)$ & Capillary dropout, SVR increase \\[4pt]
+\multicolumn{3}{l}{\emph{Renal effects}} \\[2pt]
+Biphasic $K_f$ & $K_f \times \bigl(1 + 0.25\,d\,(1 - 1.5\,d)\bigr)$ & Early hyperfiltration $\to$ mesangial expansion~\citep{brenner1996} \\
+EA constriction & $R_{\text{EA}} \times (1 + 0.25\,d)$ & AngII-driven efferent tone~\citep{brenner1996} \\
+AA dilation (early) & $R_{\text{AA}} \times \bigl(1 - 0.15\,d\,(1-d)\bigr)$ & Prostaglandin-mediated, TGF blunting~\citep{vallon2003} \\
+SGLT2 hyperactivity & $\eta_{\text{PT}} + 0.06\,d$ & Increased proximal Na reabsorption~\citep{thomson2004} \\
+MAP setpoint shift & $\text{MAP}^* + 8\,d$ mmHg & Loss of nocturnal dipping \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Cardiac pathways.} Diabetes drives HFpEF through two reinforcing mechanisms. First, advanced glycation end-products (AGEs) cross-link collagen fibrils in the myocardial extracellular matrix, increasing passive stiffness $k_1$ by up to 40\% at severe diabetes~\citep{vanheerebeek2008}. This steepens the EDPVR, producing elevated filling pressures at the same end-diastolic volume---the hemodynamic signature of HFpEF. Second, AGE-mediated arterial stiffening increases pulse wave velocity by up to 50\%~\citep{prenner2015}, raising systolic afterload and further impairing diastolic relaxation. These cardiac effects are compounded by a modest reduction in contractility ($S_{f,\text{act}} \times 0.80$ at $d=1$) from diabetic cardiomyopathy~\citep{bugger2014} and microvascular rarefaction that increases SVR.
+
+\textbf{Renal pathways.} The renal effects of diabetes exhibit a clinically important \emph{biphasic} trajectory. The ultrafiltration coefficient follows:
+\begin{equation}
+K_f^{\text{diab}} = K_f \cdot \bigl(1 + 0.25\,d\,(1 - 1.5\,d)\bigr)
+\label{eq:kf_diab}
+\end{equation}
+At mild diabetes ($d \approx 0.33$), this peaks at $+8\%$ above baseline, capturing the early hyperfiltration phase driven by glomerular hypertrophy and afferent arteriolar dilation~\citep{brenner1996}. At severe diabetes ($d = 1$), it falls to $0.625 \times K_f$, reflecting progressive mesangial expansion and GBM thickening. Simultaneously, AngII-driven efferent arteriolar constriction ($R_{\text{EA}} \times 1.25$ at $d=1$) elevates glomerular capillary pressure $P_{\text{gc}}$, sustaining hyperfiltration in early disease but accelerating nephron damage over time~\citep{brenner1996}. SGLT2 hyperactivity increases proximal tubule sodium reabsorption by up to 6\% of filtered load~\citep{thomson2004}, reducing macula densa sodium delivery and blunting the TGF signal that would normally trigger protective afferent vasoconstriction~\citep{vallon2003}.
+
+\textbf{Cross-organ amplification.} The critical modeling insight is that diabetes does not simply add independent injuries to each organ---it \emph{amplifies the hemodynamic coupling loop}. On the cardiac side, increased $k_1$ raises LVEDP and CVP, which via the heart-to-kidney messages ($\uparrow$CVP, $\downarrow$MAP) worsen renal congestion and reduce perfusion pressure. On the renal side, SGLT2-mediated sodium retention and declining $K_f$ expand blood volume and raise SVR, which via the kidney-to-heart messages ($\uparrow V_{\text{blood}}$, $\uparrow$SVR) further load the already-stiffened ventricle. The result is that a diabetic patient experiences faster cardiorenal deterioration than would be predicted by summing the independent cardiac and renal effects of diabetes alone. This multiplicative interaction is naturally captured by our framework because the \texttt{InflammatoryState} modifiers are applied \emph{within} the coupling loop: each organ's diabetic injury is experienced in the context of the other organ's already-altered hemodynamic messages.
+
+\textbf{Composition with systemic inflammation.} The \texttt{InflammatoryState} mediator also encodes a systemic inflammation index $i \in [0,1]$, representing CRP-associated endothelial dysfunction, which has its own set of cardiac and renal modifiers. Inflammatory and diabetic effects compose multiplicatively where they share a target (e.g., arterial stiffness factor $= (1 + 0.30\,i)(1 + 0.50\,d)$) and additively for distinct pathways (e.g., $\eta_{\text{PT}}$ offset $= 0.04\,i + 0.06\,d$). This composition structure allows the model to represent the full spectrum of comorbidity burden observed in the HFpEF population, where diabetes and inflammation frequently co-occur and interact.
+
+\subsection{Clinical Emission Functions}
+\label{sec:emission}
+
+A critical requirement for connecting the simulator to clinical data is mapping its internal state to observable clinical measurements. We implement a comprehensive emission layer that extracts 113 ARIC-compatible clinical variables from each coupled simulation state, organized into eight categories:
+
+\begin{itemize}
+\item \textbf{LV structure} (7 variables): LVIDd, LVIDs, IVSd, LVPWd, LV mass (ASE and cube), relative wall thickness---derived from CircAdapt cavity volumes and wall geometry.
+
+\item \textbf{LV systolic function} (6 variables): LVEDV, LVESV, LVEF, fractional shortening, cardiac output, global longitudinal strain---derived from cavity volume waveforms and fiber strain.
+
+\item \textbf{Diastolic function} (8 variables): E, A, E/A ratio, deceleration time, e$'$, a$'$, E/e$'$, LVEDP---derived from mitral valve flow and tissue velocity waveforms.
+
+\item \textbf{Atrial/RV} (6 variables): LA volume, RA area, RV dimensions, TAPSE, PASP---derived from atrial cavity volumes and RV fiber mechanics.
+
+\item \textbf{Hemodynamics} (6 variables): SBP, DBP, MAP, heart rate, SVR, pulse pressure---derived from aortic pressure waveforms.
+
+\item \textbf{Vascular} (3 variables): arterial compliance, pulse wave velocity, augmentation index---derived from aortic pressure morphology.
+
+\item \textbf{Renal} (8 variables): GFR, eGFR, serum creatinine, BUN, UACR, RBF, $P_{\text{glom}}$, fractional sodium excretion---derived from Hallow model outputs with demographic correction.
+
+\item \textbf{Biomarkers} (4 variables): NT-proBNP, troponin, CRP, cystatin C---derived from hemodynamic stress and inflammatory state.%TODO: biomarker derivation needs refinement
+\end{itemize}
+
+Each emission function documents the physiological derivation from CircAdapt signals and/or Hallow outputs, ensuring mechanistic traceability between simulator state and clinical observables. This emission layer serves as the bridge between the latent disease state (simulator parameters) and the observable clinical measurements, analogous to the observation model in a hidden Markov model or state-space formulation.
+
+\subsection{Synthetic Cohort Generation}
+\label{sec:cohort}
+
+To create training data for the neural network, we generate synthetic patient cohorts by sampling disease parameter trajectories and running the full coupled simulator:
+
+\begin{enumerate}
+\item \textbf{Demographics sampling:} Age, sex, BSA, and height are sampled from distributions matching the ARIC Visit~5 population.
+
+\item \textbf{Visit~5 state:} Baseline disease parameters $\theta_5^H, \theta_5^K$ are sampled from clinically informed distributions (e.g., $S_f^{\text{scale}} \sim U(0.6, 1.0)$, $K_f^{\text{scale}} \sim U(0.3, 1.0)$, inflammation $\sim U(0, 0.5)$). The coupled model is run to steady state and emission functions extract 113 ARIC variables.
+
+\item \textbf{Disease progression:} Parameters evolve from Visit~5 to Visit~7 (6-year follow-up) via sampled progression rates, including stochastic deterioration in contractility, nephron loss, and inflammatory burden.
+
+\item \textbf{Visit~7 state:} The coupled model is re-run with progressed parameters and emission functions extract the V7 clinical state.
+\end{enumerate}
+
+This produces paired $(X_5, X_7)$ vectors of 113 clinical variables each, with known ground-truth disease parameters at both time points. The cohort generator is parallelized across CPU cores, producing $\sim$10,000 synthetic patients in approximately 2 hours.
+
+\subsection{Neural Network: V5 $\to$ V7 Prediction}
+\label{sec:nn}
+
+A residual MLP learns the six-year disease progression mapping $X_7 = X_5 + f_\phi(X_5)$, where the residual architecture ensures the network learns only the disease-progression delta rather than reconstructing the full clinical state:
+\begin{equation}
+\hat{X}_7 = W_{\text{skip}} \cdot X_5 + g_\phi(X_5)
+\label{eq:residual}
+\end{equation}
+where $W_{\text{skip}}$ is a learnable linear skip connection and $g_\phi$ is a stack of residual blocks (Linear $\to$ BatchNorm $\to$ ReLU $\to$ Dropout $\to$ Linear $\to$ BatchNorm, with additive skip). The architecture uses 3 residual blocks with hidden dimension 256 and dropout 0.1. The loss function is a weighted MSE over the 113 variables, with weights reflecting clinical importance (e.g., LVEF, eGFR, E/e$'$ weighted at 1.0; structural measurements at 0.5).
+
+The neural network serves as a fast forward predictor: given a patient's Visit~5 clinical state, it produces a predicted Visit~7 target in $\sim$1\,ms. This target is then passed to the agentic inference engine (Section~\ref{sec:agent}) to recover the mechanistic disease parameters that explain the predicted progression.
+
+\subsection{Agentic Inference Engine}
+\label{sec:agent}
+
+The central methodological contribution is an agentic LLM-based inference engine that recovers individualized disease parameters from clinical observations by iteratively querying the mechanistic simulator. Unlike end-to-end learned inverse models, this approach preserves full mechanistic interpretability: every parameter has a direct physiological meaning, and the agent produces natural-language explanations of its reasoning.
+
+\textbf{Architecture.} The agent is implemented as a tool-calling loop over a large language model (GPT-4o, Gemini, or Claude via LiteLLM). The LLM receives a system prompt encoding cardiorenal physiology expertise and is equipped with four callable tools:
+
+\begin{enumerate}
+\item \texttt{run\_circadapt\_model}$(\theta)$: Runs the full coupled CircAdapt + Hallow model with disease parameters $\theta$ and returns 113 ARIC variables ($\sim$0.5s per call).
+\item \texttt{compute\_error}$(X_{\text{model}}, X_{\text{target}})$: Computes weighted per-variable error between model output and clinical target, returning aggregate error, worst-5 variables, and directional mismatches.
+\item \texttt{get\_sensitivity}$(\theta, p, \delta)$: Finite-difference Jacobian $\partial X / \partial p$ via two model runs ($\sim$1s), identifying which clinical variables are most sensitive to each disease parameter.
+\item \texttt{compare\_to\_clinical\_norms}$(X)$: Classifies each variable as normal/borderline/abnormal per clinical thresholds, providing disease staging context.
+\end{enumerate}
+
+\textbf{Inference loop.} Given a patient's Visit~5 data $X_5$ and a Visit~7 target $X_7^*$ (from the neural network or direct clinical data), the agent:
+
+\begin{enumerate}
+\item Analyzes $X_7^*$ to identify the dominant phenotype (HFrEF, HFpEF, CKD, combined cardiorenal syndrome).
+\item Sets initial disease parameters based on the phenotype pattern.
+\item Iteratively runs the simulator, computes error versus target, performs sensitivity analysis on the worst-matching variables, and adjusts parameters accordingly.
+\item Upon convergence (aggregate error below threshold), produces a \emph{parameter policy} (which parameters changed from baseline and by how much) and a \emph{mechanistic explanation} (what disease processes explain the V5$\to$V7 transition).
+\end{enumerate}
+
+\textbf{Fallback optimization.} If the LLM-guided search stagnates (error plateau over 3 consecutive iterations after $\geq$10 iterations), the system falls back to Nelder-Mead simplex optimization initialized from the agent's best parameters, ensuring convergence even when the LLM's reasoning fails to find the optimal direction.
+
+\textbf{Output.} The agent returns: (a)~optimal disease parameters $\theta^*$ with physiological semantics, (b)~the model's predicted V7 state $X_7(\theta^*)$, (c)~aggregate and per-variable error, (d)~a natural-language parameter policy, and (e)~a mechanistic explanation of the disease trajectory. This combination of quantitative precision and interpretable reasoning is what distinguishes the agentic approach from purely numerical optimization.
+
+\subsection{Counterfactual Decomposition}
+\label{sec:decomposition}
+
+To attribute each organ's deterioration to specific mechanistic drivers, we decompose the per-step change $\Delta y_t = y_t - y_{t-1}$ for a target variable $y$ into three additive components by running counterfactual simulations.
+
+\textbf{Cardiac decomposition} ($y = \text{EF}$). Let $\text{EF}(\gamma, V, R)$ denote the heart model's ejection fraction at given stiffness, volume, and resistance. At step~$t$:
+\begin{align}
+\delta_H &= \text{EF}(\gamma_t, V_0, 1) - \text{EF}(\gamma_{t-1}, V_0, 1) \label{eq:dh}\\
+\delta_{K_s} &= \text{EF}(\gamma_t, V_{t-1}, R_{t-1}) - \text{EF}_{t-1} - \delta_H \label{eq:dks}\\
+\delta_{K_r} &= \Delta\text{EF}_t - \delta_H - \delta_{K_s} \label{eq:dkr}
+\end{align}
+where $\delta_H$ isolates the effect of stiffness progression at baseline renal conditions (\textbf{own disease}), $\delta_{K_s}$ captures amplification from the kidney's accumulated pathological state---elevated $V_{\text{blood}}$ and SVR (\textbf{other organ's state}), and $\delta_{K_r}$ is the residual attributable to the kidney's change this step (\textbf{other organ's rate of decline}).
+
+\textbf{Renal decomposition} ($y = \text{GFR}$). A parallel uncoupled simulation ($\alpha = 0$) with identical disease schedules yields the counterfactual:
+\begin{align}
+\delta_K &= \Delta\text{GFR}_t^{\,\alpha=0} \quad \text{(own disease)} \label{eq:dk}\\
+\delta_{H_{\text{tot}}} &= \Delta\text{GFR}_t - \delta_K \quad \text{(cardiac influence)} \label{eq:dhtot}
+\end{align}
+The cardiac influence is further split between heart \emph{state} and heart \emph{rate} by the ratio of accumulated hemodynamic deficit to instantaneous hemodynamic change:
+\begin{align}
+w &= \frac{|\Delta\text{MAP}_t| + |\Delta\text{CVP}_t|}{D_{\text{acc}} + |\Delta\text{MAP}_t| + |\Delta\text{CVP}_t|} \nonumber\\
+\delta_{H_s} &= (1-w)\,\delta_{H_{\text{tot}}}, \qquad \delta_{H_r} = w\,\delta_{H_{\text{tot}}} \label{eq:dhsplit}
+\end{align}
+where $D_{\text{acc}} = |\overline{\text{MAP}} - \text{MAP}_t| + \max(\text{CVP}_t - 3, 0)$ is the accumulated hemodynamic deficit.
+
+\textbf{Rate amplification.} The aggregate amplification due to coupling is:
+\begin{equation}
+\mathcal{A}_y = \frac{\overline{|\Delta y^{\alpha}|} - \overline{|\Delta y^{0}|}}{\max\bigl(\overline{|\Delta y^{0}|},\; \tfrac{1}{2}\overline{|\Delta y^{\alpha}|},\; \epsilon\bigr)}
+\label{eq:amplification}
+\end{equation}
+where bars denote time-averaged absolute per-step rates and $\epsilon$ prevents division by zero when the uncoupled trajectory is near-stationary.
+
+\subsection{End-to-End Pipeline}
+\label{sec:pipeline}
+
+The complete digital twin pipeline integrates all components:
+\begin{enumerate}
+\item \textbf{Input:} Patient's Visit~5 clinical measurements $X_5$ (up to 113 variables; missing values are imputed from population means).
+\item \textbf{Neural network prediction:} $\hat{X}_7 = f_\phi(X_5)$ produces a Visit~7 target ($\sim$1\,ms).
+\item \textbf{Agentic parameter recovery:} The CardiorenalAgent iteratively searches for $\theta^*$ such that the coupled simulator output $X_7(\theta^*)$ matches $\hat{X}_7$ ($\sim$30--60s, typically 5--15 model evaluations).
+\item \textbf{Trajectory generation:} With $\theta^*$ recovered, the coupled simulator can generate dense intermediate trajectories, run counterfactual decompositions, and simulate treatment interventions.
+\item \textbf{Output:} Predicted V7 state, optimal disease parameters, parameter policy, mechanistic explanation, and driver attribution.
+\end{enumerate}
+
+This architecture separates the fast but opaque neural network (which handles the high-dimensional V5$\to$V7 mapping) from the slow but interpretable mechanistic simulator (which provides physiological grounding), with the agentic LLM serving as the bridge that recovers mechanistic parameters from data-driven predictions.
+
+
+%% ═══════════════════════════════════════════════════════════════════════════
+%% REFERENCES
+%% ═══════════════════════════════════════════════════════════════════════════
+
+\bibliography{paper_refs}
+
+\end{document}

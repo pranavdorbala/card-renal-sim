@@ -1,0 +1,38 @@
+% Minimal MLHC 2024 style (PMLR-compatible)
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{mlhc2024}[2024/01/01 MLHC 2024 Style]
+
+\DeclareOption{accepted}{}
+\DeclareOption{submitted}{}
+\ProcessOptions\relax
+
+\RequirePackage[margin=1in]{geometry}
+\RequirePackage{times}
+\RequirePackage{natbib}
+
+% Title
+\newcommand{\mlhctitle}[1]{%
+  \begin{center}
+    {\LARGE\bfseries #1 \par}
+    \vskip 0.2in
+  \end{center}
+}
+
+% Author list environment
+\newenvironment{mlhcauthorlist}{%
+  \begin{center}\large
+}{%
+  \end{center}
+}
+
+% Author command
+\newcommand{\mlhcauthor}[2]{#1\textsuperscript{#2}}
+
+% Affiliation
+\newcommand{\mlhcaffiliation}[2]{%
+  \begin{center}
+    \textsuperscript{#1}\textit{#2}
+  \end{center}
+}
+
+\endinput
