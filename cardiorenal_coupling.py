@@ -41,7 +41,8 @@ Author: Generated for cardiorenal research coupling study
 import numpy as np                              # Numerical array operations for hemodynamic waveforms and algebra
 from dataclasses import dataclass, field        # Structured data containers for renal state and messages
 from typing import Dict, List, Optional, Tuple  # Type hints for function signatures
-import warnings, copy                           # warnings: suppress CircAdapt convergence warnings; copy: deep-copy state
+import warnings, copy, time                     # warnings: suppress CircAdapt convergence warnings; copy: deep-copy state
+from sim_logging import sim_logger              # Structured logging for simulation runs
 
 # ── CircAdapt import ─────────────────────────────────────────────────────
 # VanOsta2024 is the latest CircAdapt cardiac mechanics model, providing
@@ -2055,6 +2056,18 @@ def run_coupled_simulation(
         hist['effective_Kf'].append(effective_kf)                    # Effective Kf after inflammatory modification
         hist['effective_k1'].append(effective_k1)                    # Effective k1 after inflammatory modification
 
+        # ── Log this step to structured log file ───────────────────
+        sim_logger.log_run(
+            params={'Sf_act_scale': sf, 'k1_scale': k1, 'Kf_scale': kf,
+                    'inflammation_scale': infl, 'diabetes_scale': diab},
+            outputs={'EF': hemo['EF'], 'MAP': hemo['MAP'], 'CO': hemo['CO'],
+                     'SV': hemo['SV'], 'GFR': renal.GFR, 'V_blood': renal.V_blood,
+                     'Na_excr': renal.Na_excretion, 'P_glom': renal.P_glom},
+            success=True,
+            source='run_coupled_simulation',
+            step=s + 1,
+        )
+
     # ── Simulation complete ──────────────────────────────────────────
     print(f"\n{'='*70}")
     print("  SIMULATION COMPLETE")
@@ -2268,6 +2281,21 @@ def run_coupled_simulation_rl(
         hist['observations'].append(obs)
         hist['actions_alpha'].append(alpha_vec.copy())
         hist['actions_residual'].append(residuals.copy())
+
+        # ── Log this step to structured log file ───────────────────
+        sim_logger.log_run(
+            params={'Sf_act_scale': sf, 'k1_scale': k1, 'Kf_scale': kf,
+                    'inflammation_scale': infl, 'diabetes_scale': diab},
+            outputs={'EF': hemo['EF'], 'MAP': hemo['MAP'], 'CO': hemo['CO'],
+                     'SV': hemo['SV'], 'GFR': renal.GFR, 'V_blood': renal.V_blood,
+                     'Na_excr': renal.Na_excretion, 'P_glom': renal.P_glom},
+            policy={'alpha_h2k': alpha_vec[:3].tolist(),
+                    'alpha_k2h': alpha_vec[3:5].tolist(),
+                    'residuals': residuals.tolist()},
+            success=True,
+            source='run_coupled_simulation_rl',
+            step=s + 1,
+        )
 
         prev_obs = obs
 

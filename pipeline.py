@@ -386,10 +386,17 @@ class CardiorenalPipeline:
             v7_targets = [None] * n
 
         def process_one(i):
-            """Process a single patient through the full pipeline."""
-            return self.predict_and_explain(
-                v5_batch[i], demographics_batch[i], v7_targets[i]
-            )
+            """Process a single patient through the full pipeline.
+
+            Wrapped in try/except so one patient's failure doesn't
+            kill the entire batch.
+            """
+            try:
+                return self.predict_and_explain(
+                    v5_batch[i], demographics_batch[i], v7_targets[i]
+                )
+            except Exception as e:
+                return {'error': str(e), 'patient_index': i}
 
         if n_workers <= 1:
             # Sequential processing (useful for debugging — stack traces

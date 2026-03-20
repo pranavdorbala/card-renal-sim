@@ -39,6 +39,7 @@ from typing import Dict, Tuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from sim_logging import sim_logger
 from config import (
     TUNABLE_PARAMS, NUMERIC_VAR_NAMES, NON_NUMERIC_VARS, COHORT_DEFAULTS,
     CORE_20_VARIABLES, MEASUREMENT_NOISE, CYSTATIN_C_PARAMS, PASP_MISSING_PARAMS,
@@ -259,9 +260,28 @@ def evaluate_patient_state(
             sex=demographics.get('sex', 'M'),
         )
 
+        sim_logger.log_run(
+            params=params,
+            outputs={'EF': hemo['EF'], 'MAP': hemo['MAP'], 'CO': hemo['CO'],
+                     'SV': hemo['SV'], 'GFR': renal_state['GFR'],
+                     'V_blood': renal_state['V_blood'],
+                     'Na_excr': renal_state.get('Na_excretion', params.get('na_intake', 150.0)),
+                     'P_glom': renal_state['P_glom']},
+            success=True,
+            source='evaluate_patient_state',
+            demographics=demographics,
+        )
+
         return aric_vars
 
-    except Exception:
+    except Exception as e:
+        sim_logger.log_run(
+            params=params,
+            success=False,
+            error=str(e),
+            source='evaluate_patient_state',
+            demographics=demographics,
+        )
         return None
 
 
@@ -355,34 +375,44 @@ def generate_patient_params(rng: np.random.Generator) -> Dict:
 
 
 def _process_patient(args: Tuple) -> Optional[Tuple[np.ndarray, np.ndarray, Dict]]:
-    """Worker: generate one patient's V5 and V7 ARIC variable vectors."""
-    patient_idx, seed = args
-    rng = np.random.default_rng(seed)
-    patient = generate_patient_params(rng)
+    """Worker: generate one patient's V5 and V7 ARIC variable vectors.
 
-    v5_vars = evaluate_patient_state(
-        patient['v5_params'], patient['demographics_v5'],
-        n_coupling_steps=COHORT_DEFAULTS['n_coupling_steps'],
-        dt_renal_hours=COHORT_DEFAULTS['dt_renal_hours'],
-    )
-    if v5_vars is None:
+    Wrapped in try/except so that any unexpected Python-level error
+    returns None instead of killing the multiprocessing pool.
+    C-level crashes (e.g., CircAdapt segfault) are handled at the
+    pool level in generate_paired_cohort().
+    """
+    try:
+        patient_idx, seed = args
+        rng = np.random.default_rng(seed)
+        patient = generate_patient_params(rng)
+
+        v5_vars = evaluate_patient_state(
+            patient['v5_params'], patient['demographics_v5'],
+            n_coupling_steps=COHORT_DEFAULTS['n_coupling_steps'],
+            dt_renal_hours=COHORT_DEFAULTS['dt_renal_hours'],
+        )
+        if v5_vars is None:
+            return None
+
+        v7_vars = evaluate_patient_state(
+            patient['v7_params'], patient['demographics_v7'],
+            n_coupling_steps=COHORT_DEFAULTS['n_coupling_steps'],
+            dt_renal_hours=COHORT_DEFAULTS['dt_renal_hours'],
+        )
+        if v7_vars is None:
+            return None
+
+        v5_vec = np.array([float(v5_vars.get(k, 0.0)) for k in NUMERIC_VAR_NAMES])
+        v7_vec = np.array([float(v7_vars.get(k, 0.0)) for k in NUMERIC_VAR_NAMES])
+
+        if np.any(~np.isfinite(v5_vec)) or np.any(~np.isfinite(v7_vec)):
+            return None
+
+        return (v5_vec, v7_vec, patient)
+
+    except Exception:
         return None
-
-    v7_vars = evaluate_patient_state(
-        patient['v7_params'], patient['demographics_v7'],
-        n_coupling_steps=COHORT_DEFAULTS['n_coupling_steps'],
-        dt_renal_hours=COHORT_DEFAULTS['dt_renal_hours'],
-    )
-    if v7_vars is None:
-        return None
-
-    v5_vec = np.array([float(v5_vars.get(k, 0.0)) for k in NUMERIC_VAR_NAMES])
-    v7_vec = np.array([float(v7_vars.get(k, 0.0)) for k in NUMERIC_VAR_NAMES])
-
-    if np.any(~np.isfinite(v5_vec)) or np.any(~np.isfinite(v7_vec)):
-        return None
-
-    return (v5_vec, v7_vec, patient)
 
 
 def generate_paired_cohort(
