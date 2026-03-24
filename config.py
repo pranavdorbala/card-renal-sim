@@ -1541,9 +1541,14 @@ RL_CONFIG = {
     'alpha_min': 0.5,
     'alpha_max': 1.5,
 
-    # --- Inflammatory residual bounds ---
-    'residual_min': -0.3,
-    'residual_max': 0.3,
+    # --- Per-factor inflammatory residual bounds ---
+    # Each residual shifts base + res; these bounds guarantee base + res ∈ [floor, ceiling].
+    # Derivation: res_min = floor - min_base, res_max = ceiling - max_base,
+    # where min/max base come from compute_inflammatory_state() at infl,diab ∈ {0,1}.
+    # See code_workings.md Section 5 for full derivation.
+    # Order: [Sf_act, p0, stiffness, passive_k1, Kf, R_AA, R_EA, RAAS_gain, eta_PT, MAP_sp]
+    'residual_min': [-0.30, -0.50, -0.50, -0.50,  0.00, -0.66, -0.70, -0.70, -0.10, -10.0],
+    'residual_max': [ 0.30,  0.30,  0.30,  0.30,  0.958, 0.30,  0.30,  0.30,  0.10,  12.0],
 
     # --- Healthy message baselines (for alpha scaling reference) ---
     'baselines': {

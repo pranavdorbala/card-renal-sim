@@ -160,12 +160,17 @@ class CouplingPolicyHead(nn.Module):
     def __init__(self, embed_dim: int = 64, n_coupling: int = 5,
                  n_residuals: int = 10,
                  alpha_min: float = 0.5, alpha_max: float = 1.5,
-                 residual_min: float = -0.3, residual_max: float = 0.3):
+                 residual_min=None, residual_max=None):
         super().__init__()
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
-        self.residual_min = residual_min
-        self.residual_max = residual_max
+        # Per-factor residual bounds (arrays) or uniform scalar (backward compat)
+        if residual_min is None:
+            residual_min = [-0.3] * n_residuals
+        if residual_max is None:
+            residual_max = [0.3] * n_residuals
+        self.residual_min = torch.tensor(residual_min, dtype=torch.float32) if not isinstance(residual_min, torch.Tensor) else residual_min
+        self.residual_max = torch.tensor(residual_max, dtype=torch.float32) if not isinstance(residual_max, torch.Tensor) else residual_max
 
         # Shared trunk from pooled embeddings
         self.trunk = nn.Sequential(
@@ -208,10 +213,12 @@ class CouplingPolicyHead(nn.Module):
         alpha_mean = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(alpha_raw)
         alpha_std = self.alpha_logstd.exp().expand_as(alpha_mean)
 
-        # Residual: tanh → [residual_min, residual_max]
+        # Residual: tanh → per-factor [residual_min_i, residual_max_i]
         residual_raw = self.residual_mean(joint)
-        residual_mean = 0.5 * (self.residual_min + self.residual_max) + \
-                        0.5 * (self.residual_max - self.residual_min) * torch.tanh(residual_raw)
+        r_min = self.residual_min.to(joint.device)
+        r_max = self.residual_max.to(joint.device)
+        residual_mean = 0.5 * (r_min + r_max) + \
+                        0.5 * (r_max - r_min) * torch.tanh(residual_raw)
         residual_std = self.residual_logstd.exp().expand_as(residual_mean)
 
         value = self.value_head(joint)
@@ -419,8 +426,9 @@ class AttentionCouplingPolicy(nn.Module):
         # Clamp to valid bounds
         alpha_action = np.clip(alpha_action, self.policy_head.alpha_min,
                               self.policy_head.alpha_max)
-        res_action = np.clip(res_action, self.policy_head.residual_min,
-                            self.policy_head.residual_max)
+        res_action = np.clip(res_action,
+                            self.policy_head.residual_min.numpy(),
+                            self.policy_head.residual_max.numpy())
 
         action = np.concatenate([alpha_action, res_action])
         return action, log_prob, value.item()
@@ -493,6 +501,6 @@ class AttentionCouplingPolicy(nn.Module):
             'n_residuals': self.policy_head.residual_mean.out_features,
             'alpha_min': self.policy_head.alpha_min,
             'alpha_max': self.policy_head.alpha_max,
-            'residual_min': self.policy_head.residual_min,
-            'residual_max': self.policy_head.residual_max,
+            'residual_min': self.policy_head.residual_min.tolist(),
+            'residual_max': self.policy_head.residual_max.tolist(),
         }

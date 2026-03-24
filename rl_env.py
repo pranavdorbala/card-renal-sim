@@ -128,6 +128,17 @@ class CardiorenalCouplingEnv(gymnasium.Env):
         self._current_step = 0
         self._prev_obs = None
 
+        # Pre-equilibrate kidney: 5 short (6h) baseline renal updates so
+        # TGF setpoint and sodium balance stabilize before monthly steps.
+        hemo_init = self._heart.run_to_steady_state()
+        h2k_init = heart_to_kidney(hemo_init)
+        for _ in range(5):
+            self._renal = update_renal_model(
+                self._renal, h2k_init.MAP, h2k_init.CO, h2k_init.Pven,
+                dt_hours=6.0,
+                inflammatory_state=self._ist,
+            )
+
         # Run initial step with neutral coupling to get first observation
         obs_dict = self._run_step_internal(
             alpha_vec=np.ones(5),
@@ -212,7 +223,7 @@ class CardiorenalCouplingEnv(gymnasium.Env):
         return obs_vec, reward, terminated, False, info
 
     def _rescale_action(self, action: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Rescale raw [-1, 1] action to coupling alphas and residuals."""
+        """Rescale raw [-1, 1] action to coupling alphas and per-factor residuals."""
         raw_alpha = action[:5]
         raw_residual = action[5:]
 
@@ -222,9 +233,9 @@ class CardiorenalCouplingEnv(gymnasium.Env):
         alpha_vec = alpha_min + 0.5 * (raw_alpha + 1.0) * (alpha_max - alpha_min)
         alpha_vec = np.clip(alpha_vec, alpha_min, alpha_max)
 
-        # Residuals: [-1,1] → [residual_min, residual_max]
-        res_min = self.config['residual_min']
-        res_max = self.config['residual_max']
+        # Residuals: [-1,1] → per-factor [residual_min_i, residual_max_i]
+        res_min = np.asarray(self.config['residual_min'], dtype=np.float64)
+        res_max = np.asarray(self.config['residual_max'], dtype=np.float64)
         residuals = res_min + 0.5 * (raw_residual + 1.0) * (res_max - res_min)
         residuals = np.clip(residuals, res_min, res_max)
 

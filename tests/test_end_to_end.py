@@ -154,7 +154,8 @@ class TestEnvPolicyIntegration:
             action, log_prob, value = policy.get_action(obs_dict, deterministic=True)
             # Convert to [-1, 1] range for env
             a_min, a_max = RL_CONFIG['alpha_min'], RL_CONFIG['alpha_max']
-            r_min, r_max = RL_CONFIG['residual_min'], RL_CONFIG['residual_max']
+            r_min = np.asarray(RL_CONFIG['residual_min'], dtype=np.float64)
+            r_max = np.asarray(RL_CONFIG['residual_max'], dtype=np.float64)
             alpha_raw = 2.0 * (action[:5] - a_min) / (a_max - a_min) - 1.0
             res_raw = 2.0 * (action[5:] - r_min) / (r_max - r_min) - 1.0
             env_action = np.concatenate([np.clip(alpha_raw, -1, 1),

@@ -293,3 +293,125 @@ The ODE version also tracks **dynamic state variables** that accumulate over tim
 **Why this matters:** In the ODE version, a patient inflamed for 5 years develops irreversible fibrosis, while a patient inflamed for 1 month does not — the simple version cannot distinguish these cases. The ODE version would also make the inflammatory layer **bidirectional**: kidney damage causes inflammation which worsens heart damage which worsens kidney damage, creating the cardiorenal syndrome vicious cycle as an emergent property rather than a prescribed input.
 
 **Why it's commented out:** The simple version is sufficient for the current paper. The ODE version is ready for future activation but adds parameters that would need calibration against longitudinal clinical data.
+
+---
+
+## 5. RL Simulation Timing and Kidney Pre-Equilibration
+
+### How the RL simulation is timed
+
+One RL episode covers **8 years** (96 monthly coupling steps). Each coupling step represents **1 month**:
+
+```
+1 coupling step (1 month)
+├── Heart: run to steady state (instantaneous — heart equilibrates in seconds)
+├── Heart → Kidney message: MAP, CO, CVP
+├── Kidney: 4 substeps × 180 hours = 720 hours ≈ 30 days
+│   ├── substep 1: 180h of sodium/water balance ODE
+│   ├── substep 2: 180h of sodium/water balance ODE
+│   ├── substep 3: 180h of sodium/water balance ODE
+│   └── substep 4: 180h of sodium/water balance ODE
+├── Kidney → Heart message: V_blood, SVR_ratio
+└── RL observes state, collects reward
+```
+
+The kidney model works in real physiological time — it integrates `dV/dt = intake - excretion` forward by `dt_hours` each substep. 4 × 180h = 720h ≈ 30 days = 1 month. The heart is assumed to always be in equilibrium (it reaches steady state in seconds, while the kidney takes days to adjust volume).
+
+The non-RL path (`run_coupled_simulation`) uses `dt_renal_hours=6.0` with a single renal update per step — fine for short demonstrations but would need 11,680 steps for 8 years (infeasible for RL training).
+
+### The V_blood overshoot bug and pre-equilibration fix
+
+**Bug:** At initialization, the kidney's TGF setpoint is unset (`TGF_setpoint=0`) and sodium balance hasn't been calibrated. The first 180h substep runs the sodium balance ODE for 180 hours with an uncalibrated excretion rate — intake far exceeds excretion, so V_blood jumps by ~600 mL. After 4 substeps, V_blood hits the 8000 mL ceiling clamp. The non-RL path avoids this because its 6h steps are small enough that each step barely changes V_blood (~20 mL), letting the kidney self-correct gradually.
+
+**Fix:** Run 5 short (6h) baseline renal updates before the main loop starts (`run_coupled_simulation_rl`, ~line 2183; `rl_env.reset`, ~line 133). This lets the kidney:
+1. Initialize TGF_setpoint to a self-consistent value
+2. Calibrate sodium excretion to match intake
+3. Settle V_blood to ~5096 mL (matching the non-RL baseline)
+
+After pre-equilibration, the 180h substeps work correctly because intake ≈ excretion and the per-step V_blood change is small.
+
+```python
+# Pre-equilibrate: 5 × 6h = 30 hours of baseline kidney warmup
+hemo_init = heart.run_to_steady_state()
+h2k_init = heart_to_kidney(hemo_init)
+for _ in range(5):
+    renal = update_renal_model(
+        renal, h2k_init.MAP, h2k_init.CO, h2k_init.Pven,
+        dt_hours=6.0,
+        inflammatory_state=ist,
+    )
+```
+
+---
+
+## 6. RL Residual Bounds — Per-Factor Action Space
+
+### The problem
+
+The RL policy learns additive corrections (residuals) to the inflammatory modifier factors. Previously, `apply_inflammatory_residuals()` applied these corrections and then silently clamped the result with `max()` floors and `np.clip()`:
+
+```python
+# OLD (silent clamping — RL doesn't know what value was applied)
+ist_corrected.Sf_act_factor = max(ist.Sf_act_factor + residuals[0], 0.3)
+```
+
+When clamping activates, the RL thinks it applied `base + residual` but the simulator actually used the clamped value. The RL learns the wrong gradient — it associates its action with an outcome it didn't cause.
+
+### The fix
+
+Move the bounding into the RL's action space so the RL can only produce valid residuals. No clipping in `apply_inflammatory_residuals` — just `base + residual`.
+
+The constraint chain:
+1. **Policy network** (`CouplingPolicyHead.forward`): tanh maps raw output to per-factor `[residual_min_i, residual_max_i]`
+2. **Env rescaling** (`rl_env._rescale_action`): raw `[-1, 1]` → per-factor `[residual_min_i, residual_max_i]`
+3. **Application** (`apply_inflammatory_residuals`): just `base + residual`, no clipping
+
+The RL always knows exactly what value was applied.
+
+### Bound derivation
+
+Each factor has a base range from `compute_inflammatory_state()` (with `infl, diab ∈ [0, 1]`) and a physiological valid range `[floor, ceiling]`. The per-factor residual bounds are computed as:
+
+```
+residual_min_i = floor_i - min_base_i    (ensures base + res ≥ floor at lowest base)
+residual_max_i = ceiling_i - max_base_i  (ensures base + res ≤ ceiling at highest base)
+```
+
+For factors that had existing `np.clip` ceilings (Kf, eta_PT, MAP_setpoint), those ceilings are preserved. For factors that only had `max()` floors, the ceiling is `max_base + 0.3` (the maximum the RL could ever reach with the old uniform ±0.3 range).
+
+| Factor | min_base | max_base | floor | ceiling | res_min | res_max | Floor source | Ceiling source |
+|---|---|---|---|---|---|---|---|---|
+| `Sf_act_factor` | 0.60 | 1.00 | 0.30 | 1.30 | -0.30 | 0.30 | old code | max_base + 0.3 |
+| `p0_factor` | 1.00 | 1.265 | 0.50 | 1.565 | -0.50 | 0.30 | old code | max_base + 0.3 |
+| `stiffness_factor` | 1.00 | 1.95 | 0.50 | 2.25 | -0.50 | 0.30 | old code | max_base + 0.3 |
+| `passive_k1_factor` | 1.00 | 1.40 | 0.50 | 1.70 | -0.50 | 0.30 | old code | max_base + 0.3 |
+| `Kf_factor` | 0.05 | 1.042 | 0.05 | 2.00 | 0.00 | 0.958 | old code | old code (np.clip) |
+| `R_AA_factor` | 0.96 | 1.20 | 0.30 | 1.50 | -0.66 | 0.30 | old code | max_base + 0.3 |
+| `R_EA_factor` | 1.00 | 1.25 | 0.30 | 1.55 | -0.70 | 0.30 | old code | max_base + 0.3 |
+| `RAAS_gain_factor` | 1.00 | 1.30 | 0.30 | 1.60 | -0.70 | 0.30 | old code | max_base + 0.3 |
+| `eta_PT_offset` | 0.00 | 0.10 | -0.10 | 0.20 | -0.10 | 0.10 | old code | old code (np.clip) |
+| `MAP_setpoint_offset` | 0.00 | 8.00 | -10.0 | 20.0 | -10.0 | 12.0 | old code | old code (np.clip) |
+
+**Base value derivations** (from `compute_inflammatory_state`, infl/diab ∈ [0,1]):
+- `Sf_act_factor = (1-0.25·infl)·(1-0.20·diab)` → min at infl=1,diab=1: 0.75×0.80 = 0.60; max at 0,0: 1.00
+- `p0_factor = (1+0.15·infl)·(1+0.10·diab)` → min at 0,0: 1.00; max at 1,1: 1.15×1.10 = 1.265
+- `stiffness_factor = (1+0.30·infl)·(1+0.50·diab)` → min at 0,0: 1.00; max at 1,1: 1.30×1.50 = 1.95
+- `passive_k1_factor = 1+0.40·diab` → min at 0: 1.00; max at 1: 1.40
+- `Kf_factor = max((1-0.20·infl)·(1+0.25·d·(1-1.5d)), 0.05)` → min ≈ 0.05 (floor); max at infl=0,diab=1/3: 1.042
+- `R_AA_factor = (1+0.20·infl)·(1-0.15·d·(1-d))` → min at infl=0,diab=0.5: 0.9625; max at infl=1,diab=0: 1.20
+- `R_EA_factor = 1+0.25·diab` → min at 0: 1.00; max at 1: 1.25
+- `RAAS_gain_factor = 1+0.30·infl` → min at 0: 1.00; max at 1: 1.30
+- `eta_PT_offset = 0.04·infl+0.06·diab` → min at 0,0: 0.00; max at 1,1: 0.10
+- `MAP_setpoint_offset = max(5·infl, 8·diab)` → min at 0,0: 0.00; max at diab=1: 8.00
+
+### Files changed
+
+| File | What changed |
+|---|---|
+| `config.py` (~line 1545) | `residual_min`/`residual_max` changed from scalars to 10-element per-factor arrays |
+| `rl_env.py` (`_rescale_action`) | Uses `np.asarray` to handle per-factor bounds |
+| `models/attention_coupling.py` (`CouplingPolicyHead`) | Stores bounds as tensors, tanh maps to per-factor ranges |
+| `models/attention_coupling.py` (`act`, `get_config`) | Clips and serializes per-factor arrays |
+| `train_rl.py` (~line 192) | Inverse mapping uses `np.asarray` for per-factor bounds |
+| `tests/test_end_to_end.py` (~line 157) | Inverse mapping uses `np.asarray` for per-factor bounds |
+| `cardiorenal_coupling.py` (`apply_inflammatory_residuals`) | Removed all clipping — just `base + residual` |

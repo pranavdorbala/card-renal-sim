@@ -627,10 +627,12 @@ class HallowRenalModel:
     eta_DT:  float = 0.05            # Distal tubule fractional reabsorption (NCC transporter)
     eta_CD0: float = 0.024           # Collecting duct baseline (aldosterone-sensitive via ENaC)
 
-    # ── Water balance (Eq. 11) ──────────────────────────────────────────
-    # Fraction of filtered water that is reabsorbed by the tubules.
-    # The kidney filters ~180 L/day but excretes only ~1.5 L/day.
-    frac_water_reabs: float = 0.99   # 99% of filtered water is reabsorbed
+    # ── Water balance (Eq. 11, Hallow Eq. 31) ────────────────────────────
+    # Base fraction of filtered water reabsorbed by the tubules.
+    # Modulated dynamically by the vasopressin PI controller (see Stage 4
+    # in update_renal_model). The kidney filters ~180 L/day but excretes
+    # only ~1.5-2 L/day at baseline.
+    frac_water_reabs: float = 0.99   # Baseline: 99% of filtered water is reabsorbed
 
     # ── Intake rates ─────────────────────────────────────────────────────
     # Dietary intake rates represent the external forcing functions for
@@ -657,11 +659,30 @@ class HallowRenalModel:
     # Below this, renin secretion increases; above it, RAAS is suppressed.
     MAP_setpoint: float = 93.0       # RAAS quiescence pressure [mmHg]
 
-    # ── Dynamic state variables (Eq. 11-12) ──────────────────────────────
-    # These are integrated over time by the volume balance equations.
-    V_blood: float = 5000.0          # Total circulating blood volume [mL] (Eq. 11)
-    Na_total: float = 2100.0         # Total body sodium [mEq] (approx C_Na * V_ECF) (Eq. 12)
-    C_Na:    float = 140.0           # Plasma sodium concentration [mEq/L]
+    # ── Vasopressin PI controller parameters (Hallow Eq. 31) ──────────────
+    # The ADH/vasopressin system regulates collecting duct water reabsorption
+    # based on plasma [Na+]. From the original Hallow 2017 source code
+    # (bitbucket.org/hallowkm/lv-hypertrophy-model, modelfile_commented.R).
+    C_Na_setpoint:       float = 140.0   # ref_Na_concentration [mEq/L]
+    VP_outer_gain:       float = 0.05    # Na_controller_gain
+    VP_Kp:               float = 2.0     # Kp_VP (proportional gain)
+    VP_Ki:               float = 0.005   # Ki_VP (integral gain)
+    VP_saturation_Km:    float = 0.15    # ADH saturation half-constant
+    Q_water:             float = 1.0     # Water transfer rate blood <-> interstitial [mL/min per mEq/L]
+    Q_Na:                float = 1.0     # Na transfer rate blood <-> interstitial [mEq/min per mEq/L]
+
+    # ── Dynamic state variables (Eq. 11-12, Hallow two-compartment) ─────
+    # Blood (plasma) compartment
+    V_blood: float = 5000.0          # blood_volume_L * 1000 [mL]
+    Na_total: float = 700.0          # sodium_amount: plasma Na [mEq] (C_Na * V_blood_L = 140 * 5)
+    C_Na:    float = 140.0           # Na_concentration [mEq/L]
+    # Interstitial fluid compartment
+    V_interstitial: float = 15000.0  # interstitial_fluid_volume * 1000 [mL] (IF_nom = 15 L)
+    IF_sodium: float = 2100.0        # IF_sodium_amount [mEq] (140 * 15)
+    IF_C_Na:   float = 140.0         # IF_Na_concentration [mEq/L]
+    # Vasopressin PI controller state
+    VP_integral_error: float = 0.0   # Na_concentration_error (integral accumulator)
+    VP_normalized: float = 1.0       # normalized_vasopressin_concentration (1.0 = baseline)
 
     # ── Output variables (computed each coupling step) ───────────────────
     # These are written by update_renal_model() and used for recording
@@ -1338,48 +1359,81 @@ def update_renal_model(renal: HallowRenalModel,
     Na_excr_min = Na_after_CD * pn                                  # Urinary Na excretion [mEq/min]
     Na_excr_day = Na_excr_min * 1440.0                              # Convert to [mEq/day] (1440 min/day)
 
-    # ── Stage 4: Water excretion (Section 3.2, Eq. 11) ───────────────
-    # Water excretion = filtered volume * (1 - fractional reabsorption).
-    # In steady state, this balances oral water intake at ~1.5-2 L/day.
-    water_excr_min = GFR * (1.0 - renal.frac_water_reabs)          # Water excretion [mL/min]
+    # ── Stage 4: Vasopressin PI controller & water excretion (Hallow Eq. 31) ──
+    # ADH/vasopressin is a PI controller on plasma [Na+]:
+    #   C_Na > setpoint → VP rises → more CD water reabsorption → dilutes plasma
+    #   C_Na < setpoint → VP falls → less reabsorption → excretes water
+    # This negative feedback prevents V_blood from drifting (see issues.md #1).
+
+    dt_min = dt_hours * 60.0                                        # Time-step [minutes]
+
+    # PI controller on plasma sodium concentration error
+    Na_error = renal.C_Na - renal.C_Na_setpoint                     # [mEq/L] (+ = hypernatremic)
+    renal.VP_integral_error += Na_error * dt_min                     # Integral accumulator [mEq/L·min]
+
+    # Normalized vasopressin: VP = 1 + outer_gain × (Kp × error + Ki × ∫error·dt)
+    # At baseline (C_Na = 140): VP = 1.0
+    VP_raw = 1.0 + renal.VP_outer_gain * (
+        renal.VP_Kp * Na_error +                                    # Proportional response
+        renal.VP_Ki * renal.VP_integral_error                       # Integral (eliminates steady-state offset)
+    )
+    renal.VP_normalized = max(VP_raw, 0.0)                          # VP ≥ 0
+
+    # ADH permeability: Michaelis-Menten saturation (Hallow Eq. 31)
+    # ADH_perm = VP / (Km + VP), range [0, 1). At VP=1: ADH = 1/(0.15+1) = 0.87
+    ADH_perm = renal.VP_normalized / (renal.VP_saturation_Km + renal.VP_normalized)
+
+    # Effective fractional water reabsorption: linear in ADH_perm
+    #   frac_eff = frac_min + (frac_max - frac_min) × ADH_perm
+    #   frac_min = 0.90  (no ADH → dilute urine, ~17 L/day at GFR=120)
+    #   frac_max = 0.998 (max ADH → concentrated urine, ~0.35 L/day at GFR=120)
+    # At baseline VP=1, ADH=0.87: frac_eff ≈ 0.985 → excr ≈ 2.6 L/day
+    # VP controller settles to match intake (2.0 L/day) at steady state.
+    frac_min = 0.90
+    frac_max = 0.998
+    frac_eff = frac_min + (frac_max - frac_min) * ADH_perm
+
+    water_excr_min = GFR * (1.0 - frac_eff)                        # Water excretion [mL/min]
     water_excr_day = water_excr_min * 1440.0 / 1000.0              # Convert to [L/day]
 
-    # ── Stage 5: Volume and Na balance ODEs (Section 3.2, Eq. 11-12) ─
-    # These are Euler-integrated forward in time by dt_hours.
-    # They capture the slow (hours-days) dynamics of fluid and sodium
-    # homeostasis that link acute hemodynamic changes to chronic
-    # volume and pressure effects.
-    dt_min = dt_hours * 60.0                                        # Convert time-step to minutes for rate calculations
+    # ── Stage 5: Two-compartment volume & Na balance ODEs (Hallow Eq. 11-12) ─
+    # Two fluid compartments: blood (plasma) and interstitial.
+    # Transfer driven by concentration gradient:
+    #   Water (osmosis): moves toward higher [Na] (follows solute)
+    #   Sodium (diffusion): moves toward lower [Na] (down gradient)
 
-    # Eq. 12: Sodium balance ODE: dNa_total/dt = Na_intake - Na_excretion
-    # Na_total represents total body exchangeable sodium.
-    Na_in_min = renal.Na_intake / 1440.0                            # Na intake rate [mEq/min] (from daily intake)
-    renal.Na_total = max(
-        renal.Na_total + (Na_in_min - Na_excr_min) * dt_min,       # Euler integration of Na balance
-        800.0                                                        # Floor: minimum physiological body Na [mEq]
-    )
+    Na_in_min = renal.Na_intake / 1440.0                            # Na intake [mEq/min]
+    W_in_min = renal.water_intake * 1000.0 / 1440.0                # Water intake [mL/min]
 
-    # Eq. 11: Blood volume ODE: dV_blood/dt = water_in - water_out
-    # The 0.33 factor accounts for the Starling equilibrium between
-    # intravascular and interstitial compartments: only ~1/3 of any
-    # net ECF change appears as a blood volume change. The remaining
-    # 2/3 distributes to the interstitial space (edema).
-    W_in_min = renal.water_intake * 1000.0 / 1440.0                # Water intake rate [mL/min] (L/day -> mL/min)
-    dV = (W_in_min - water_excr_min) * dt_min                      # Net ECF volume change [mL]
-    renal.V_blood = np.clip(
-        renal.V_blood + dV * 0.33,                                  # Only 1/3 of ECF change enters blood volume
-        3000.0,                                                      # Floor: severe hypovolemia limit [mL]
-        8000.0                                                       # Ceiling: extreme hypervolemia limit [mL]
-    )
+    dC_Na = renal.C_Na - renal.IF_C_Na                              # Plasma - interstitial [mEq/L]
 
-    # Update plasma sodium concentration from total Na and ECF volume.
-    # V_ECF = V_blood / 0.33 (blood is ~1/3 of ECF).
-    # C_Na = Na_total / V_ECF, clamped to [125, 155] mEq/L (clinical range).
-    V_ECF = renal.V_blood / 0.33                                    # Estimated ECF volume [mL]
+    # Blood compartment:
+    #   dV_blood/dt = water_in - urine_out + Q_water × (C_Na - IF_C_Na)
+    #   dNa_blood/dt = Na_in - Na_excr + Q_Na × (IF_C_Na - C_Na)
+    dV_blood = (W_in_min - water_excr_min + renal.Q_water * dC_Na) * dt_min
+    dNa_blood = (Na_in_min - Na_excr_min - renal.Q_Na * dC_Na) * dt_min
+
+    # Interstitial compartment (mirror, conservation):
+    #   dV_IF/dt = Q_water × (IF_C_Na - C_Na)
+    #   dNa_IF/dt = Q_Na × (C_Na - IF_C_Na)
+    dV_IF = (-renal.Q_water * dC_Na) * dt_min
+    dNa_IF = (renal.Q_Na * dC_Na) * dt_min
+
+    # Euler integration with safety clamps
+    renal.V_blood = np.clip(renal.V_blood + dV_blood, 3000.0, 8000.0)
+    renal.Na_total = max(renal.Na_total + dNa_blood, 200.0)
+
+    renal.V_interstitial = max(renal.V_interstitial + dV_IF, 5000.0)
+    renal.IF_sodium = max(renal.IF_sodium + dNa_IF, 500.0)
+
+    # Update concentrations from new volumes and amounts
     renal.C_Na = np.clip(
-        renal.Na_total / (V_ECF * 1e-3),                            # Na concentration [mEq/L] = mEq / (mL * 1e-3 L/mL)
-        125.0,                                                       # Hyponatremia floor
-        155.0                                                        # Hypernatremia ceiling
+        renal.Na_total / (renal.V_blood * 1e-3),                    # Plasma [Na+] [mEq/L]
+        125.0, 155.0
+    )
+    renal.IF_C_Na = np.clip(
+        renal.IF_sodium / (renal.V_interstitial * 1e-3),            # Interstitial [Na+] [mEq/L]
+        125.0, 155.0
     )
 
     # ── Stage 6: Store outputs (Section 3.2) ─────────────────────────
@@ -1624,6 +1678,12 @@ def apply_inflammatory_residuals(
     factors, discovering where the parametric approximations over- or
     under-estimate diabetes/inflammation effects that span both organs.
 
+    No clipping is performed here — the RL's action space is constrained
+    at the source (tanh in CouplingPolicyHead + per-factor rescaling in
+    rl_env._rescale_action) so that base + residual always falls within
+    physiological bounds. This ensures the RL always knows what value
+    was actually applied.
+
     Parameters
     ----------
     ist : InflammatoryState
@@ -1637,20 +1697,20 @@ def apply_inflammatory_residuals(
     Returns
     -------
     InflammatoryState
-        New state with corrected modifier values, clamped to safe bounds.
+        New state with corrected modifier values.
     """
     import copy
     ist_corrected = copy.copy(ist)
-    ist_corrected.Sf_act_factor = max(ist.Sf_act_factor + residuals[0], 0.3)
-    ist_corrected.p0_factor = max(ist.p0_factor + residuals[1], 0.5)
-    ist_corrected.stiffness_factor = max(ist.stiffness_factor + residuals[2], 0.5)
-    ist_corrected.passive_k1_factor = max(ist.passive_k1_factor + residuals[3], 0.5)
-    ist_corrected.Kf_factor = float(np.clip(ist.Kf_factor + residuals[4], 0.05, 2.0))
-    ist_corrected.R_AA_factor = max(ist.R_AA_factor + residuals[5], 0.3)
-    ist_corrected.R_EA_factor = max(ist.R_EA_factor + residuals[6], 0.3)
-    ist_corrected.RAAS_gain_factor = max(ist.RAAS_gain_factor + residuals[7], 0.3)
-    ist_corrected.eta_PT_offset = float(np.clip(ist.eta_PT_offset + residuals[8], -0.1, 0.2))
-    ist_corrected.MAP_setpoint_offset = float(np.clip(ist.MAP_setpoint_offset + residuals[9], -10.0, 20.0))
+    ist_corrected.Sf_act_factor = ist.Sf_act_factor + residuals[0]
+    ist_corrected.p0_factor = ist.p0_factor + residuals[1]
+    ist_corrected.stiffness_factor = ist.stiffness_factor + residuals[2]
+    ist_corrected.passive_k1_factor = ist.passive_k1_factor + residuals[3]
+    ist_corrected.Kf_factor = ist.Kf_factor + residuals[4]
+    ist_corrected.R_AA_factor = ist.R_AA_factor + residuals[5]
+    ist_corrected.R_EA_factor = ist.R_EA_factor + residuals[6]
+    ist_corrected.RAAS_gain_factor = ist.RAAS_gain_factor + residuals[7]
+    ist_corrected.eta_PT_offset = ist.eta_PT_offset + residuals[8]
+    ist_corrected.MAP_setpoint_offset = ist.MAP_setpoint_offset + residuals[9]
     return ist_corrected
 
 
@@ -2168,6 +2228,22 @@ def run_coupled_simulation_rl(
     heart = CircAdaptHeartModel()
     renal = HallowRenalModel()
     ist = InflammatoryState()
+
+    # Pre-equilibrate kidney (Algorithm 1, Step 3).
+    # The RL path uses large dt (180h × 4 substeps = 1 month per coupling
+    # step). At initialization the kidney's TGF setpoint is unset and sodium
+    # balance hasn't been calibrated, so a 180h substep causes massive
+    # sodium retention and V_blood overshoots to the 8000 mL ceiling.
+    # Fix: run 5 short (6h) baseline renal updates so the kidney finds its
+    # sodium balance before the main loop begins with large timesteps.
+    hemo_init = heart.run_to_steady_state()
+    h2k_init = heart_to_kidney(hemo_init)
+    for _ in range(5):
+        renal = update_renal_model(
+            renal, h2k_init.MAP, h2k_init.CO, h2k_init.Pven,
+            dt_hours=6.0,
+            inflammatory_state=ist,
+        )
 
     # History dictionary (standard fields + RL-specific)
     hist = {k: [] for k in [

@@ -189,7 +189,8 @@ class PPOTrainer:
 
             # Map from bounded [alpha_min, alpha_max] back to [-1, 1]
             a_min, a_max = self.config['alpha_min'], self.config['alpha_max']
-            r_min, r_max = self.config['residual_min'], self.config['residual_max']
+            r_min = np.asarray(self.config['residual_min'], dtype=np.float64)
+            r_max = np.asarray(self.config['residual_max'], dtype=np.float64)
             alpha_raw = 2.0 * (alpha_np - a_min) / (a_max - a_min) - 1.0
             res_raw = 2.0 * (res_np - r_min) / (r_max - r_min) - 1.0
             action = np.concatenate([

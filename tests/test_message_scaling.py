@@ -122,45 +122,43 @@ class TestInflammatoryResiduals:
         result = apply_inflammatory_residuals(ist, residuals)
         assert result.Sf_act_factor == pytest.approx(0.9)
 
-    def test_clamping_sf_act_factor(self):
-        """Sf_act_factor should be clamped at ≥ 0.3."""
+    def test_no_clamping_sf_act_factor(self):
+        """Sf_act_factor should NOT be clamped — bounds enforced in RL action space."""
         ist = InflammatoryState()
         ist.Sf_act_factor = 0.4
         residuals = np.zeros(10)
-        residuals[0] = -0.3  # would be 0.1, but clamped to 0.3
+        residuals[0] = -0.3
         result = apply_inflammatory_residuals(ist, residuals)
-        assert result.Sf_act_factor >= 0.3
+        assert result.Sf_act_factor == pytest.approx(0.1)  # pure addition, no floor
 
-    def test_clamping_kf_factor(self):
-        """Kf_factor should be clamped to [0.05, 2.0]."""
+    def test_no_clamping_kf_factor(self):
+        """Kf_factor should NOT be clamped — bounds enforced in RL action space."""
         ist = InflammatoryState()
         ist.Kf_factor = 0.1
-        # Large negative residual
         residuals = np.zeros(10)
         residuals[4] = -0.3
         result = apply_inflammatory_residuals(ist, residuals)
-        assert result.Kf_factor >= 0.05
+        assert result.Kf_factor == pytest.approx(-0.2)  # pure addition, no floor
 
-        # Large positive residual
         ist.Kf_factor = 1.9
         residuals[4] = 0.3
         result = apply_inflammatory_residuals(ist, residuals)
-        assert result.Kf_factor <= 2.0
+        assert result.Kf_factor == pytest.approx(2.2)  # pure addition, no ceiling
 
-    def test_clamping_eta_pt_offset(self):
-        """eta_PT_offset should be clamped to [-0.1, 0.2]."""
+    def test_no_clamping_eta_pt_offset(self):
+        """eta_PT_offset should NOT be clamped — bounds enforced in RL action space."""
         ist = InflammatoryState()
         ist.eta_PT_offset = 0.0
         residuals = np.zeros(10)
         residuals[8] = -0.3
         result = apply_inflammatory_residuals(ist, residuals)
-        assert result.eta_PT_offset >= -0.1
+        assert result.eta_PT_offset == pytest.approx(-0.3)  # pure addition, no floor
 
-    def test_clamping_map_setpoint(self):
-        """MAP_setpoint_offset should be clamped to [-10, 20]."""
+    def test_no_clamping_map_setpoint(self):
+        """MAP_setpoint_offset should NOT be clamped — bounds enforced in RL action space."""
         ist = InflammatoryState()
         ist.MAP_setpoint_offset = 15.0
         residuals = np.zeros(10)
         residuals[9] = 10.0
         result = apply_inflammatory_residuals(ist, residuals)
-        assert result.MAP_setpoint_offset <= 20.0
+        assert result.MAP_setpoint_offset == pytest.approx(25.0)  # pure addition, no ceiling
