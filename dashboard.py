@@ -26,6 +26,7 @@ try:
         CircAdaptHeartModel, HallowRenalModel, InflammatoryState,
         update_inflammatory_state, update_renal_model,
         heart_to_kidney, kidney_to_heart, ML_TO_M3,
+        run_coupled_simulation,
     )
     LIVE_MODE = True
 except ImportError:
@@ -149,16 +150,8 @@ def generate_demo_data(n_cycles, months_per_cycle, k1_init, Kf_init,
 
 def run_live_simulation(n_cycles, months_per_cycle, k1_init, Kf_init,
                         lambda_c, k_c, lambda_r, k_r, alpha_c, alpha_r, Z):
-    """Run the simulation. Uses demo data generator (fast, stable).
-    CircAdapt live mode available but requires small time steps for stability."""
-    # Always use demo data for the dashboard visualization.
-    # The demo generator produces physiologically reasonable trajectories
-    # using the Weibull model + simplified hemodynamic relationships.
-    # For full CircAdapt fidelity, use run_coupled_simulation() directly.
-    return generate_demo_data(n_cycles, months_per_cycle, k1_init, Kf_init,
-                              lambda_c, k_c, lambda_r, k_r, alpha_c, alpha_r, Z)
-
-    # Live CircAdapt mode (kept for future use with stabilized time stepping)
+    """Run the simulation. Uses CircAdapt + Hallow when available,
+    falls back to demo data generator if CircAdapt not installed."""
     if not LIVE_MODE:
         return generate_demo_data(n_cycles, months_per_cycle, k1_init, Kf_init,
                                   lambda_c, k_c, lambda_r, k_r, alpha_c, alpha_r, Z)
@@ -167,9 +160,17 @@ def run_live_simulation(n_cycles, months_per_cycle, k1_init, Kf_init,
         n_cycles, months_per_cycle, k1_init, Kf_init,
         lambda_c, k_c, lambda_r, k_r, alpha_c, alpha_r, Z)
 
-    dt_renal_step = 6.0  # hours per sub-step (Hallow default)
-    n_renal_substeps = max(1, int(months_per_cycle * 30 * 24 / dt_renal_step))
+    # Use the real coupled simulator (one 6h renal step per cycle).
+    # This avoids the V_blood drift that occurs with many substeps.
+    sim_hist = run_coupled_simulation(
+        n_steps=n_cycles,
+        dt_renal_hours=6.0,
+        cardiac_schedule=Sf_sched,
+        kidney_schedule=Kf_sched,
+        stiffness_schedule=k1_sched,
+    )
 
+    # Convert run_coupled_simulation output to dashboard format
     hist = {k: [] for k in [
         'step', 'SBP', 'DBP', 'MAP', 'CO', 'SV', 'EF',
         'V_blood', 'GFR', 'Na_excr', 'P_glom', 'Pven', 'SVR_ratio', 'LVEDP',
@@ -180,72 +181,35 @@ def run_live_simulation(n_cycles, months_per_cycle, k1_init, Kf_init,
         'k2h_Vblood', 'k2h_SVR', 'k2h_GFR',
     ]}
 
-    heart = CircAdaptHeartModel()
-    renal = HallowRenalModel()
-    ist = InflammatoryState()
-
-    for s in range(n_cycles):
-        sf, kf, k1 = Sf_sched[s], Kf_sched[s], k1_sched[s]
-
-        ist = update_inflammatory_state(ist, 0.0, 0.0)
-        heart.apply_inflammatory_modifiers(ist)
-        eff_k1 = k1 * ist.passive_k1_factor
-        heart.apply_stiffness(eff_k1)
-        eff_sf = max(sf * ist.Sf_act_factor, 0.20)
-        heart.apply_deterioration(eff_sf)
-        renal.Kf_scale = kf
-        eff_kf = kf * ist.Kf_factor
-
-        try:
-            hemo = heart.run_to_steady_state()
-        except Exception as e:
-            print(f"  [DASH] Heart solver failed at cycle {s+1}: {e}")
-            break
-
-        h2k = heart_to_kidney(hemo)
-        # Sub-step the renal model (Hallow needs small dt for Euler stability)
-        for _ in range(n_renal_substeps):
-            renal = update_renal_model(renal, h2k.MAP, h2k.CO, h2k.Pven, dt_renal_step)
-        k2h = kidney_to_heart(renal, h2k.MAP, h2k.CO, h2k.Pven)
-        heart.apply_kidney_feedback(k2h.V_blood * ML_TO_M3, k2h.SVR_ratio)
-
-        # Extract LVEDP from PV loop
-        try:
-            p_lv = hemo['p_LV']
-            v_lv = hemo['V_LV']
-            edv_idx = np.argmax(v_lv)
-            lvedp = float(p_lv[edv_idx])
-        except Exception:
-            lvedp = hemo.get('Pven', 8.0) + 3.0
-
+    for s in range(len(sim_hist['MAP'])):
         hist['step'].append(s + 1)
-        hist['MAP'].append(round(hemo['MAP'], 1))
-        hist['SBP'].append(round(hemo['SBP'], 1))
-        hist['DBP'].append(round(hemo['DBP'], 1))
-        hist['CO'].append(round(hemo['CO'], 2))
-        hist['SV'].append(round(hemo['SV'], 1))
-        hist['EF'].append(round(hemo['EF'], 1))
-        hist['Pven'].append(round(hemo.get('Pven', 5.0), 1))
-        hist['LVEDP'].append(round(lvedp, 1))
-        hist['V_blood'].append(round(renal.V_blood, 0))
-        hist['GFR'].append(round(renal.GFR, 1))
-        hist['Na_excr'].append(round(renal.Na_excretion, 0))
-        hist['P_glom'].append(round(renal.P_glom, 1))
-        hist['SVR_ratio'].append(round(k2h.SVR_ratio, 3))
-        hist['Kf_scale'].append(round(kf, 3))
-        hist['k1_scale'].append(round(k1, 3))
-        hist['Sf_scale'].append(round(sf, 3))
-        hist['effective_Kf'].append(round(eff_kf, 3))
-        hist['effective_k1'].append(round(eff_k1, 3))
-        hist['effective_Sf'].append(round(eff_sf, 3))
+        hist['MAP'].append(round(float(sim_hist['MAP'][s]), 1))
+        hist['SBP'].append(round(float(sim_hist['SBP'][s]), 1))
+        hist['DBP'].append(round(float(sim_hist['DBP'][s]), 1))
+        hist['CO'].append(round(float(sim_hist['CO'][s]), 2))
+        hist['SV'].append(round(float(sim_hist['SV'][s]), 1))
+        hist['EF'].append(round(float(sim_hist['EF'][s]), 1))
+        hist['Pven'].append(round(float(sim_hist.get('Pven', [5.0]*n_cycles)[s]), 1))
+        hist['LVEDP'].append(round(float(sim_hist.get('LVEDP', [8.0]*n_cycles)[s]), 1))
+        hist['V_blood'].append(round(float(sim_hist['V_blood'][s]), 0))
+        hist['GFR'].append(round(float(sim_hist['GFR'][s]), 1))
+        hist['Na_excr'].append(round(float(sim_hist['Na_excr'][s]), 0))
+        hist['P_glom'].append(round(float(sim_hist['P_glom'][s]), 1))
+        hist['SVR_ratio'].append(round(float(sim_hist.get('SVR_ratio', [1.0]*n_cycles)[s]), 3))
+        hist['Kf_scale'].append(round(Kf_sched[s], 3))
+        hist['k1_scale'].append(round(k1_sched[s], 3))
+        hist['Sf_scale'].append(round(Sf_sched[s], 3))
+        hist['effective_Kf'].append(round(float(sim_hist.get('effective_Kf', Kf_sched)[s]), 3))
+        hist['effective_k1'].append(round(float(sim_hist.get('effective_k1', k1_sched)[s]), 3))
+        hist['effective_Sf'].append(round(float(sim_hist.get('effective_Sf', Sf_sched)[s]), 3))
         hist['D_cardiac'].append(round(D_c[s], 4))
         hist['D_renal'].append(round(D_r[s], 4))
-        hist['h2k_MAP'].append(round(h2k.MAP, 1))
-        hist['h2k_CO'].append(round(h2k.CO, 2))
-        hist['h2k_Pven'].append(round(h2k.Pven, 1))
-        hist['k2h_Vblood'].append(round(k2h.V_blood, 0))
-        hist['k2h_SVR'].append(round(k2h.SVR_ratio, 3))
-        hist['k2h_GFR'].append(round(k2h.GFR, 1))
+        hist['h2k_MAP'].append(round(float(sim_hist['MAP'][s]), 1))
+        hist['h2k_CO'].append(round(float(sim_hist['CO'][s]), 2))
+        hist['h2k_Pven'].append(round(float(sim_hist.get('Pven', [5.0]*n_cycles)[s]), 1))
+        hist['k2h_Vblood'].append(round(float(sim_hist['V_blood'][s]), 0))
+        hist['k2h_SVR'].append(round(float(sim_hist.get('SVR_ratio', [1.0]*n_cycles)[s]), 3))
+        hist['k2h_GFR'].append(round(float(sim_hist['GFR'][s]), 1))
 
     print(f"  [DASH] Live simulation completed {len(hist['step'])}/{n_cycles} cycles")
     return hist

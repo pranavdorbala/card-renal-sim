@@ -605,9 +605,9 @@ class HallowRenalModel:
     #   MAP -> R_preAA -> R_AA -> glomerular capillaries -> R_EA -> P_renal_vein
     # Values are calibrated to produce GFR ~120 mL/min at MAP ~93 mmHg
     # in the standalone renal model (see Calibration Notes in CLAUDE.md).
-    R_preAA: float = 12.0            # Pre-afferent arteriolar resistance [mmHg*min/L]
-    R_AA0:   float = 26.0            # Afferent arteriolar baseline resistance (TGF-adjustable) [mmHg*min/L]
-    R_EA0:   float = 43.0            # Efferent arteriolar baseline resistance (RAAS-adjustable) [mmHg*min/L]
+    R_preAA: float = 10.0            # Pre-afferent arteriolar resistance [mmHg*min/L]
+    R_AA0:   float = 25.0            # Afferent arteriolar baseline resistance (TGF-adjustable) [mmHg*min/L]
+    R_EA0:   float = 52.0            # Efferent arteriolar baseline resistance (RAAS-adjustable) [mmHg*min/L]
 
     # ── Fixed pressures (Eq. 5-6) ───────────────────────────────────────
     # These are approximately constant in the Hallow model and set the
@@ -644,7 +644,7 @@ class HallowRenalModel:
     # ── Intake rates ─────────────────────────────────────────────────────
     # Dietary intake rates represent the external forcing functions for
     # the volume and sodium balance ODEs (Eq. 11-12).
-    Na_intake: float = 150.0         # Dietary sodium intake [mEq/day] (typical Western diet)
+    Na_intake: float = 137.0         # Dietary sodium intake [mEq/day] (3.2g Na/day, calibrated to match GFR=120 excretion at baseline)
     water_intake: float = 2.0        # Oral water intake [L/day]
 
     # ── Feedback gains (Eq. 8-9) ────────────────────────────────────────
@@ -664,7 +664,7 @@ class HallowRenalModel:
     RAAS_gain:    float = 1.5        # RAAS loop gain [dimensionless]
     # MAP_setpoint: the arterial pressure at which RAAS is quiescent.
     # Below this, renin secretion increases; above it, RAAS is suppressed.
-    MAP_setpoint: float = 93.0       # RAAS quiescence pressure [mmHg]
+    MAP_setpoint: float = 86.4       # RAAS quiescence pressure [mmHg] (matched to CircAdapt baseline MAP)
 
     # ── Vasopressin PI controller parameters (Hallow Eq. 31) ──────────────
     # The ADH/vasopressin system regulates collecting duct water reabsorption
@@ -2100,6 +2100,28 @@ def run_coupled_simulation(
         hist['effective_Sf'].append(effective_sf)                    # Effective Sf after inflammatory modification
         hist['effective_Kf'].append(effective_kf)                    # Effective Kf after inflammatory modification
         hist['effective_k1'].append(effective_k1)                    # Effective k1 after inflammatory modification
+
+        # ── Message passing & inflammatory state (for visualization) ──
+        hist.setdefault('h2k_MAP', []).append(h2k.MAP)
+        hist.setdefault('h2k_CO', []).append(h2k.CO)
+        hist.setdefault('h2k_Pven', []).append(h2k.Pven)
+        hist.setdefault('k2h_Vblood', []).append(k2h.V_blood)
+        hist.setdefault('k2h_SVR', []).append(k2h.SVR_ratio)
+        hist.setdefault('k2h_GFR', []).append(k2h.GFR)
+        hist.setdefault('RBF', []).append(renal.RBF)
+        hist.setdefault('water_excr', []).append(renal.water_excretion)
+        hist.setdefault('C_Na', []).append(renal.C_Na)
+        # Inflammatory modifier factors
+        hist.setdefault('Sf_act_factor', []).append(ist.Sf_act_factor)
+        hist.setdefault('Kf_factor', []).append(ist.Kf_factor)
+        hist.setdefault('p0_factor', []).append(ist.p0_factor)
+        hist.setdefault('stiffness_factor', []).append(ist.stiffness_factor)
+        hist.setdefault('passive_k1_factor', []).append(ist.passive_k1_factor)
+        hist.setdefault('R_AA_factor', []).append(ist.R_AA_factor)
+        hist.setdefault('R_EA_factor', []).append(ist.R_EA_factor)
+        hist.setdefault('RAAS_gain_factor', []).append(ist.RAAS_gain_factor)
+        hist.setdefault('eta_PT_offset', []).append(ist.eta_PT_offset)
+        hist.setdefault('MAP_setpoint_offset', []).append(ist.MAP_setpoint_offset)
 
         # ── Log this step to structured log file ───────────────────
         sim_logger.log_run(
