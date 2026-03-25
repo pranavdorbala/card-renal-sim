@@ -797,30 +797,28 @@ class InflammatoryState:
     eta_PT_offset: float = 0.0        # Proximal tubule Na reabsorption offset (Table 1: NHE3 + SGLT2 effects)
     MAP_setpoint_offset: float = 0.0  # Pressure-natriuresis curve rightward shift [mmHg] (Table 1)
 
-    # ── Future dynamic state variables (for full ODE version) ────────────
-    # These are commented out in the simple version but ready for
-    # activation when the full dynamic inflammatory model is enabled.
-    # myocardial_fibrosis_volume: float = 0.0           # Fraction of myocardium replaced by fibrosis
-    # endothelial_dysfunction_index: float = 0.0        # NO bioavailability reduction
-    # renal_tubulointerstitial_fibrosis: float = 0.0    # Fraction of nephrons lost to fibrosis
-    # AGE_accumulation: float = 0.0                     # Advanced glycation end-product burden
+    # ── Dynamic state variables (full ODE version) ───────────────────────
+    # These evolve via Euler integration in update_inflammatory_state()
+    # when use_ode=True. Sources: organ damage signals. Sinks: clearance.
+    myocardial_fibrosis_volume: float = 0.0           # Fraction of myocardium replaced by fibrosis [0-1]
+    endothelial_dysfunction_index: float = 0.0        # NO bioavailability reduction [0-1]
+    renal_tubulointerstitial_fibrosis: float = 0.0    # Fraction of nephrons lost to fibrosis [0-0.95]
+    AGE_accumulation: float = 0.0                     # Advanced glycation end-product burden [0+]
 
 
 def update_inflammatory_state(
     state: InflammatoryState,
     inflammation_scale: float,
     diabetes_scale: float,
-    # ── Inputs from heart/kidney for future ODE version ──────────────
-    # These parameters are commented out in the simple version but show
-    # the interface for the full dynamic ODE model where organ damage
-    # signals drive inflammatory state evolution.
-    # GFR: float = 120.0,           # kidney damage -> uremic inflammation
-    # EDP: float = 10.0,            # cardiac congestion -> inflammation
-    # aldosterone_factor: float = 1.0,  # RAAS -> pro-inflammatory
-    # P_glom: float = 60.0,         # glomerular pressure -> podocyte stress
-    # CVP: float = 3.0,             # venous congestion -> renal back-pressure
-    # MAP: float = 93.0,            # mean arterial pressure -> shear stress
-    # dt_hours: float = 6.0,        # integration timestep
+    # ── Inputs from heart/kidney for ODE version ─────────────────────
+    GFR: float = 120.0,           # kidney damage -> uremic inflammation
+    EDP: float = 10.0,            # cardiac congestion -> inflammation
+    aldosterone_factor: float = 1.0,  # RAAS -> pro-inflammatory
+    P_glom: float = 60.0,         # glomerular pressure -> podocyte stress
+    CVP: float = 3.0,             # venous congestion -> renal back-pressure
+    MAP: float = 93.0,            # mean arterial pressure -> shear stress
+    dt_hours: float = 6.0,        # integration timestep
+    use_ode: bool = False,        # if True, use full ODE; if False, use simple parametric
 ) -> InflammatoryState:
     """
     Update the inflammatory mediator layer.
@@ -988,119 +986,105 @@ def update_inflammatory_state(
     state.MAP_setpoint_offset = max(5.0 * infl, 8.0 * diab)
 
     # ==================================================================
-    # FULL ODE VERSION -- commented out for iterative verification
+    # FULL ODE VERSION — organ damage signals drive inflammation
     # ==================================================================
-    #
-    # When ready to activate, uncomment this block, enable the state
-    # variables in InflammatoryState, and pass GFR/EDP/aldosterone/etc
-    # from the coupling loop. This version models inflammation as a
-    # dynamic state variable with sources (organ damage signals) and
-    # sinks (immune clearance), reaching steady state over weeks-months.
-    #
-    # # ── Rate constants (to be calibrated via sensitivity analysis) ──
-    # k_uremic = 0.01           # uremic toxin -> inflammation [1/hr per (1/GFR)]
-    # k_congestion = 0.005      # cardiac congestion -> inflammation [1/hr per mmHg]
-    # k_AGE = 0.02              # AGE accumulation -> inflammation via RAGE [1/hr]
-    # k_aldo = 0.008            # aldosterone excess -> pro-inflammatory [1/hr]
-    # k_clearance = 0.05        # hepatic / immune clearance [1/hr]
-    # k_AGE_formation = 0.001   # diabetes -> AGE accumulation rate [1/hr]
-    # k_AGE_turnover = 0.0005   # AGE cross-link turnover (very slow) [1/hr]
-    # k_fibrosis_inflam = 0.003 # inflammation -> myocardial fibrosis [1/hr]
-    # k_fibrosis_mech = 0.002   # mechanical stress -> myocardial fibrosis [1/hr per EDP ratio]
-    # k_fibrosis_turnover = 0.001  # slow collagen remodeling [1/hr]
-    # k_endoth_inflam = 0.01    # inflammation -> endothelial dysfunction [1/hr]
-    # k_endoth_shear = 0.002    # hypertension -> endothelial damage [1/hr per mmHg]
-    # k_endoth_recovery = 0.008 # endothelial repair (NO restoration) [1/hr]
-    # k_renal_inflam = 0.004    # inflammation -> tubulointerstitial fibrosis [1/hr]
-    # k_renal_pressure = 0.002  # glomerular hypertension -> podocyte loss [1/hr per mmHg]
-    # k_renal_congestion = 0.003  # venous congestion -> renal fibrosis [1/hr per mmHg]
-    #
-    # # ── Sources of systemic inflammation ────────────────────────────
-    # # Kidney -> inflammation: uremic toxin accumulation
-    # # (indoxyl sulfate, p-cresyl sulfate, TMAO)
-    # uremic_source = k_uremic * max(0.0, 1.0 / max(GFR, 5.0) - 1.0 / 120.0)
-    #
-    # # Heart -> inflammation: venous congestion, elevated EDP
-    # congestion_source = k_congestion * max(0.0, EDP - 10.0)
-    #
-    # # Diabetes -> inflammation: AGE-RAGE signaling
-    # AGE_source = k_AGE * state.AGE_accumulation
-    #
-    # # RAAS -> inflammation: aldosterone is independently pro-inflammatory
-    # # (mechanistic basis for MRA therapy -- TOPCAT, FINEARTS-HF)
-    # aldo_source = k_aldo * max(0.0, aldosterone_factor - 1.0)
-    #
-    # # ── Inflammatory index ODE (logistic saturation ceiling) ────────
-    # inflam_max = 1.0
-    # d_inflam = (
-    #     uremic_source + congestion_source + AGE_source + aldo_source
-    #     - k_clearance * state.systemic_inflammatory_index
-    # ) * (1.0 - state.systemic_inflammatory_index / inflam_max)
-    # state.systemic_inflammatory_index += d_inflam * dt_hours
-    # state.systemic_inflammatory_index = np.clip(
-    #     state.systemic_inflammatory_index, 0.0, 1.0)
-    #
-    # # ── AGE accumulation (very slow timescale, diabetes-driven) ─────
-    # d_AGE = (k_AGE_formation * diab
-    #          - k_AGE_turnover * state.AGE_accumulation)
-    # state.AGE_accumulation += d_AGE * dt_hours
-    # state.AGE_accumulation = max(0.0, state.AGE_accumulation)
-    #
-    # # ── Myocardial fibrosis (slow, inflammation + mechanical) ───────
-    # # Replaces fixed p[96]+p[97] from the original model.
-    # # Inflammation: uremic toxins drive fibrosis through TGF-beta
-    # # Mechanical: elevated EDP / wall stress -> fibroblast activation
-    # d_fibrosis = (
-    #     k_fibrosis_inflam * state.systemic_inflammatory_index
-    #     + k_fibrosis_mech * max(0.0, EDP / 12.0 - 1.0)
-    #     - k_fibrosis_turnover * state.myocardial_fibrosis_volume
-    # )
-    # state.myocardial_fibrosis_volume += d_fibrosis * dt_hours
-    # state.myocardial_fibrosis_volume = np.clip(
-    #     state.myocardial_fibrosis_volume, 0.0, 1.0)
-    #
-    # # ── Endothelial dysfunction ──────────────────────────────────────
-    # # Captures NO bioavailability reduction.  Affects peripheral
-    # # resistance, renal afferent arteriole tone, and coronary
-    # # microvascular function.
-    # d_endoth = (
-    #     k_endoth_inflam * state.systemic_inflammatory_index
-    #     + k_endoth_shear * max(0.0, MAP - 100.0)
-    #     - k_endoth_recovery * state.endothelial_dysfunction_index
-    # )
-    # state.endothelial_dysfunction_index += d_endoth * dt_hours
-    # state.endothelial_dysfunction_index = np.clip(
-    #     state.endothelial_dysfunction_index, 0.0, 1.0)
-    #
-    # # ── Renal tubulointerstitial fibrosis ────────────────────────────
-    # # Drives nephron loss.  No negative term: nephron loss is
-    # # irreversible, matching clinical reality.
-    # d_renal_fib = (
-    #     k_renal_inflam * state.systemic_inflammatory_index
-    #     + k_renal_pressure * max(0.0, P_glom - 65.0)
-    #     + k_renal_congestion * max(0.0, CVP - 8.0)
-    # )
-    # state.renal_tubulointerstitial_fibrosis += d_renal_fib * dt_hours
-    # state.renal_tubulointerstitial_fibrosis = min(
-    #     state.renal_tubulointerstitial_fibrosis, 0.95)
-    #
-    # # ── Derive modifier effects from dynamic state ──────────────────
-    # infl = state.systemic_inflammatory_index
-    # fibrosis = state.myocardial_fibrosis_volume
-    # endoth = state.endothelial_dysfunction_index
-    # renal_fib = state.renal_tubulointerstitial_fibrosis
-    # AGE = state.AGE_accumulation
-    #
-    # state.Sf_act_factor = (1.0 - 0.25 * infl) * (1.0 - 0.15 * fibrosis)
-    # state.p0_factor = 1.0 + 0.15 * endoth + 0.10 * AGE
-    # state.stiffness_factor = 1.0 + 0.30 * endoth + 0.50 * AGE
-    # state.passive_k1_factor = 1.0 + 0.40 * fibrosis + 0.30 * AGE
-    # state.Kf_factor = max((1.0 - 0.20 * infl) * (1.0 - renal_fib), 0.05)
-    # state.R_AA_factor = 1.0 + 0.20 * endoth
-    # state.R_EA_factor = 1.0 + 0.25 * AGE
-    # state.RAAS_gain_factor = 1.0 + 0.30 * infl
-    # state.eta_PT_offset = 0.04 * infl + 0.06 * AGE
-    # state.MAP_setpoint_offset = 5.0 * infl + 3.0 * endoth
+    if use_ode:
+        # ── Rate constants ───────────────────────────────────────────
+        k_uremic = 0.01           # uremic toxin -> inflammation [1/hr per (1/GFR)]
+        k_congestion = 0.005      # cardiac congestion -> inflammation [1/hr per mmHg]
+        k_AGE = 0.02              # AGE accumulation -> inflammation via RAGE [1/hr]
+        k_aldo = 0.008            # aldosterone excess -> pro-inflammatory [1/hr]
+        k_clearance = 0.05        # hepatic / immune clearance [1/hr]
+        k_AGE_formation = 0.001   # diabetes -> AGE accumulation rate [1/hr]
+        k_AGE_turnover = 0.0005   # AGE cross-link turnover (very slow) [1/hr]
+        k_fibrosis_inflam = 0.003 # inflammation -> myocardial fibrosis [1/hr]
+        k_fibrosis_mech = 0.002   # mechanical stress -> myocardial fibrosis [1/hr per EDP ratio]
+        k_fibrosis_turnover = 0.001  # slow collagen remodeling [1/hr]
+        k_endoth_inflam = 0.01    # inflammation -> endothelial dysfunction [1/hr]
+        k_endoth_shear = 0.002    # hypertension -> endothelial damage [1/hr per mmHg]
+        k_endoth_recovery = 0.008 # endothelial repair (NO restoration) [1/hr]
+        k_renal_inflam = 0.004    # inflammation -> tubulointerstitial fibrosis [1/hr]
+        k_renal_pressure = 0.002  # glomerular hypertension -> podocyte loss [1/hr per mmHg]
+        k_renal_congestion = 0.003  # venous congestion -> renal fibrosis [1/hr per mmHg]
+
+        # ── Sources of systemic inflammation ─────────────────────────
+        # Kidney -> inflammation: uremic toxin accumulation
+        # (indoxyl sulfate, p-cresyl sulfate, TMAO)
+        uremic_source = k_uremic * max(0.0, 1.0 / max(GFR, 5.0) - 1.0 / 120.0)
+
+        # Heart -> inflammation: venous congestion, elevated EDP
+        congestion_source = k_congestion * max(0.0, EDP - 10.0)
+
+        # Diabetes -> inflammation: AGE-RAGE signaling
+        AGE_source = k_AGE * state.AGE_accumulation
+
+        # RAAS -> inflammation: aldosterone is independently pro-inflammatory
+        # (mechanistic basis for MRA therapy -- TOPCAT, FINEARTS-HF)
+        aldo_source = k_aldo * max(0.0, aldosterone_factor - 1.0)
+
+        # ── Inflammatory index ODE (logistic saturation ceiling) ─────
+        inflam_max = 1.0
+        d_inflam = (
+            uremic_source + congestion_source + AGE_source + aldo_source
+            - k_clearance * state.systemic_inflammatory_index
+        ) * (1.0 - state.systemic_inflammatory_index / inflam_max)
+        state.systemic_inflammatory_index += d_inflam * dt_hours
+        state.systemic_inflammatory_index = np.clip(
+            state.systemic_inflammatory_index, 0.0, 1.0)
+
+        # ── AGE accumulation (very slow timescale, diabetes-driven) ──
+        d_AGE = (k_AGE_formation * diab
+                 - k_AGE_turnover * state.AGE_accumulation)
+        state.AGE_accumulation += d_AGE * dt_hours
+        state.AGE_accumulation = max(0.0, state.AGE_accumulation)
+
+        # ── Myocardial fibrosis (slow, inflammation + mechanical) ────
+        d_fibrosis = (
+            k_fibrosis_inflam * state.systemic_inflammatory_index
+            + k_fibrosis_mech * max(0.0, EDP / 12.0 - 1.0)
+            - k_fibrosis_turnover * state.myocardial_fibrosis_volume
+        )
+        state.myocardial_fibrosis_volume += d_fibrosis * dt_hours
+        state.myocardial_fibrosis_volume = np.clip(
+            state.myocardial_fibrosis_volume, 0.0, 1.0)
+
+        # ── Endothelial dysfunction ──────────────────────────────────
+        d_endoth = (
+            k_endoth_inflam * state.systemic_inflammatory_index
+            + k_endoth_shear * max(0.0, MAP - 100.0)
+            - k_endoth_recovery * state.endothelial_dysfunction_index
+        )
+        state.endothelial_dysfunction_index += d_endoth * dt_hours
+        state.endothelial_dysfunction_index = np.clip(
+            state.endothelial_dysfunction_index, 0.0, 1.0)
+
+        # ── Renal tubulointerstitial fibrosis (irreversible) ─────────
+        d_renal_fib = (
+            k_renal_inflam * state.systemic_inflammatory_index
+            + k_renal_pressure * max(0.0, P_glom - 65.0)
+            + k_renal_congestion * max(0.0, CVP - 8.0)
+        )
+        state.renal_tubulointerstitial_fibrosis += d_renal_fib * dt_hours
+        state.renal_tubulointerstitial_fibrosis = min(
+            state.renal_tubulointerstitial_fibrosis, 0.95)
+
+        # ── Derive modifier effects from dynamic state ───────────────
+        infl = state.systemic_inflammatory_index
+        fibrosis = state.myocardial_fibrosis_volume
+        endoth = state.endothelial_dysfunction_index
+        renal_fib = state.renal_tubulointerstitial_fibrosis
+        AGE = state.AGE_accumulation
+
+        state.Sf_act_factor = (1.0 - 0.25 * infl) * (1.0 - 0.15 * fibrosis)
+        state.p0_factor = 1.0 + 0.15 * endoth + 0.10 * AGE
+        state.stiffness_factor = 1.0 + 0.30 * endoth + 0.50 * AGE
+        state.passive_k1_factor = 1.0 + 0.40 * fibrosis + 0.30 * AGE
+        state.Kf_factor = max((1.0 - 0.20 * infl) * (1.0 - renal_fib), 0.05)
+        state.R_AA_factor = 1.0 + 0.20 * endoth
+        state.R_EA_factor = 1.0 + 0.25 * AGE
+        state.RAAS_gain_factor = 1.0 + 0.30 * infl
+        state.eta_PT_offset = 0.04 * infl + 0.06 * AGE
+        state.MAP_setpoint_offset = 5.0 * infl + 3.0 * endoth
 
     return state
 
@@ -1830,6 +1814,7 @@ def run_coupled_simulation(
     stiffness_schedule: Optional[List[float]] = None,
     inflammation_schedule: Optional[List[float]] = None,
     diabetes_schedule: Optional[List[float]] = None,
+    use_ode: bool = False,
 ) -> Dict:
     """
     Run the coupled cardiorenal simulation (Algorithm 1, Section 3.3).
@@ -1945,8 +1930,12 @@ def run_coupled_simulation(
     print("  Heart : CircAdapt VanOsta2024")
     print("  Kidney: Hallow et al. 2017 renal module")
     if has_inflammation or has_diabetes:
-        print("  Mediator: Inflammatory layer (parametric scaling)")
+        print(f"  Mediator: Inflammatory layer ({'ODE' if use_ode else 'parametric'})")
     print("=" * 70)
+
+    # Track previous-step hemodynamics for ODE inflammatory model
+    prev_EDP = 10.0    # baseline end-diastolic pressure [mmHg]
+    prev_MAP = 86.4    # baseline MAP [mmHg]
 
     # ══════════════════════════════════════════════════════════════════
     # MAIN COUPLING LOOP (Algorithm 1, Steps 0-9)
@@ -1973,9 +1962,16 @@ def run_coupled_simulation(
         # ── Step 0: Update inflammatory mediator layer ───────────────
         # (Section 3.4, Table 1)
         # Recompute all modifier factors based on current inflammation
-        # and diabetes severity. These factors will be applied to both
-        # cardiac and renal parameters in subsequent steps.
-        ist = update_inflammatory_state(ist, infl, diab)
+        # and diabetes severity. In ODE mode, organ damage signals from
+        # the previous step drive inflammation dynamics.
+        ist = update_inflammatory_state(
+            ist, infl, diab,
+            GFR=renal.GFR, EDP=prev_EDP,
+            aldosterone_factor=1.0, P_glom=renal.P_glom,
+            CVP=prev_MAP * 0.05,  # approximate CVP from MAP
+            MAP=prev_MAP, dt_hours=dt_renal_hours,
+            use_ode=use_ode,
+        )
 
         # ── Step 1: Apply inflammatory modifiers to heart ────────────
         # (Section 3.4 -> Section 3.1)
@@ -2024,6 +2020,15 @@ def run_coupled_simulation(
         # currently applied perturbations.
         print("  [Heart]  Running CircAdapt to steady state ...")
         hemo = heart.run_to_steady_state()
+
+        # Update previous-step hemodynamics for ODE inflammatory model
+        prev_MAP = hemo['MAP']
+        try:
+            p_lv = hemo['p_LV']
+            v_lv = hemo['V_LV']
+            prev_EDP = float(p_lv[np.argmax(v_lv)])
+        except Exception:
+            prev_EDP = hemo.get('Pven', 5.0) + 5.0
 
         print(f"  [Heart]  MAP={hemo['MAP']:.1f}  "
               f"SBP/DBP={hemo['SBP']:.0f}/{hemo['DBP']:.0f}  "

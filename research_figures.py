@@ -47,13 +47,22 @@ healthy = run_coupled_simulation(
     diabetes_schedule=[0.0]*N_STEPS,
 )
 
-print("Running progressive disease (Sf=1→0.5, Kf=1→0.4, infl=0→0.7)...")
-# Progressive Weibull-like deterioration over 12 steps
-sf_sched  = [max(0.5, 1.0 - 0.045*i) for i in range(N_STEPS)]   # 1.0 → 0.50
-kf_sched  = [max(0.4, 1.0 - 0.055*i) for i in range(N_STEPS)]   # 1.0 → 0.40
-k1_sched  = [min(2.5, 1.0 + 0.12*i)  for i in range(N_STEPS)]   # 1.0 → 2.32
-infl_sched = [min(0.7, 0.05*i)        for i in range(N_STEPS)]   # 0.0 → 0.55
-diab_sched = [min(0.5, 0.04*i)        for i in range(N_STEPS)]   # 0.0 → 0.44
+print("Running progressive disease (Weibull deterioration)...")
+# Weibull hazard functions (Section 3.3) for organ deterioration
+# D(t) = 1 - exp(-(t/lambda)^k)
+# Cardiac: lambda=8 months, k=2.5 (accelerating failure)
+# Renal:   lambda=10 months, k=2.0 (slightly slower)
+months = np.arange(N_STEPS)  # each coupling step = 1 month
+lambda_c, k_c = 8.0, 2.5     # cardiac Weibull params
+lambda_r, k_r = 10.0, 2.0    # renal Weibull params
+D_c = 1.0 - np.exp(-((months / lambda_c) ** k_c))  # cardiac damage [0,1]
+D_r = 1.0 - np.exp(-((months / lambda_r) ** k_r))  # renal damage [0,1]
+
+sf_sched  = np.maximum(0.3, 1.0 - D_c * 0.5).tolist()     # Sf: 1.0 → 0.5 (contractility loss)
+kf_sched  = np.maximum(0.1, 1.0 - D_r * 0.8).tolist()     # Kf: 1.0 → 0.2 (nephron loss)
+k1_sched  = (1.0 + D_c * 2.0).tolist()                     # k1: 1.0 → 3.0 (stiffening)
+infl_sched = (D_c * 0.4 + D_r * 0.3).tolist()              # inflammation driven by both organ damage
+diab_sched = (D_r * 0.5).tolist()                           # diabetes driven by renal damage
 
 disease = run_coupled_simulation(
     n_steps=N_STEPS, dt_renal_hours=6.0,
@@ -62,6 +71,7 @@ disease = run_coupled_simulation(
     stiffness_schedule=k1_sched,
     inflammation_schedule=infl_sched,
     diabetes_schedule=diab_sched,
+    use_ode=True,
 )
 
 steps = np.arange(1, N_STEPS + 1)
