@@ -11,11 +11,45 @@ Usage:
     python research_figures.py
 """
 
+import json
+import os
+from datetime import datetime
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.patches import FancyArrowPatch
 from cardiorenal_coupling import run_coupled_simulation
+
+
+LOG_FILE = "logs/simulation_runs.jsonl"
+
+def _log_run(source: str, params: dict, hist: dict):
+    """Append per-step entries to simulation_runs.jsonl in the same format as agent tools."""
+    os.makedirs("logs", exist_ok=True)
+    n = len(hist["GFR"])
+    ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    with open(LOG_FILE, "a") as f:
+        for i in range(n):
+            entry = {
+                "timestamp": ts,
+                "source": source,
+                "success": True,
+                "params": params,
+                "step": i + 1,
+                "outputs": {
+                    "EF":       round(float(hist["EF"][i]),       2),
+                    "MAP":      round(float(hist["MAP"][i]),      2),
+                    "CO":       round(float(hist["CO"][i]),       2),
+                    "SV":       round(float(hist["SV"][i]),       2),
+                    "V_blood":  round(float(hist["V_blood"][i]),  2),
+                    "GFR":      round(float(hist["GFR"][i]),      2),
+                    "Na_excr":  round(float(hist["Na_excr"][i]),  2),
+                    "P_glom":   round(float(hist["P_glom"][i]),   2),
+                },
+            }
+            f.write(json.dumps(entry) + "\n")
+    print(f"  Logged {n} steps → {LOG_FILE}")
 
 # ── Style ──────────────────────────────────────────────────────────────
 plt.rcParams.update({
@@ -34,10 +68,26 @@ DISEASE_COLOR = '#e74c3c'
 INFLAM_COLOR  = '#9b59b6'
 MSG_H2K_COLOR = '#3498db'
 MSG_K2H_COLOR = '#e67e22'
-N_STEPS = 12
+N_STEPS         = 11520   # 8 years at 6h per coupling step (365.25*8*4 ≈ 11688, use 11520 = 96*120)
+STEPS_PER_MONTH = 120     # 30 days × 4 steps/day
+
+# ── Fixed disease parameters (ODE drives progression internally) ──────
+# These are CONSTANT inputs — the ODE layer (use_ode=True) accumulates
+# fibrosis, endothelial dysfunction, AGE, etc. over time and progressively
+# modifies both organ functions on top of these baselines.
+SF_DISEASE  = 0.85   # mild HFpEF contractility reduction
+KF_DISEASE  = 0.75   # ~25% reduction in filtration coefficient
+K1_DISEASE  = 1.30   # myocardial stiffening
+INFL        = 0.20   # mild chronic inflammation
+DIAB        = 0.40   # moderate diabetes
+
+DISEASE_PARAMS = {
+    "Sf_act_scale": SF_DISEASE, "Kf_scale": KF_DISEASE, "k1_scale": K1_DISEASE,
+    "inflammation_scale": INFL, "diabetes_scale": DIAB,
+}
 
 # ── Run simulations ───────────────────────────────────────────────────
-print("Running healthy baseline (12 steps)...")
+print(f"Running healthy baseline ({N_STEPS} steps = 8 years @ 6h) ...")
 healthy = run_coupled_simulation(
     n_steps=N_STEPS, dt_renal_hours=6.0,
     cardiac_schedule=[1.0]*N_STEPS,
@@ -46,35 +96,23 @@ healthy = run_coupled_simulation(
     inflammation_schedule=[0.0]*N_STEPS,
     diabetes_schedule=[0.0]*N_STEPS,
 )
+_log_run("research_figures/healthy", {"Sf_act_scale": 1.0, "Kf_scale": 1.0, "k1_scale": 1.0, "inflammation_scale": 0.0, "diabetes_scale": 0.0}, healthy)
 
-print("Running progressive disease (Weibull deterioration)...")
-# Weibull hazard functions (Section 3.3) for organ deterioration
-# D(t) = 1 - exp(-(t/lambda)^k)
-# Cardiac: lambda=8 months, k=2.5 (accelerating failure)
-# Renal:   lambda=10 months, k=2.0 (slightly slower)
-months = np.arange(N_STEPS)  # each coupling step = 1 month
-lambda_c, k_c = 8.0, 2.5     # cardiac Weibull params
-lambda_r, k_r = 10.0, 2.0    # renal Weibull params
-D_c = 1.0 - np.exp(-((months / lambda_c) ** k_c))  # cardiac damage [0,1]
-D_r = 1.0 - np.exp(-((months / lambda_r) ** k_r))  # renal damage [0,1]
-
-sf_sched  = np.maximum(0.3, 1.0 - D_c * 0.5).tolist()     # Sf: 1.0 → 0.5 (contractility loss)
-kf_sched  = np.maximum(0.1, 1.0 - D_r * 0.8).tolist()     # Kf: 1.0 → 0.2 (nephron loss)
-k1_sched  = (1.0 + D_c * 2.0).tolist()                     # k1: 1.0 → 3.0 (stiffening)
-infl_sched = (D_c * 0.4 + D_r * 0.3).tolist()              # inflammation driven by both organ damage
-diab_sched = (D_r * 0.5).tolist()                           # diabetes driven by renal damage
-
+print(f"Running disease progression ({N_STEPS} steps = 8 years, ODE-driven) ...")
 disease = run_coupled_simulation(
     n_steps=N_STEPS, dt_renal_hours=6.0,
-    cardiac_schedule=sf_sched,
-    kidney_schedule=kf_sched,
-    stiffness_schedule=k1_sched,
-    inflammation_schedule=infl_sched,
-    diabetes_schedule=diab_sched,
+    cardiac_schedule=[SF_DISEASE]*N_STEPS,
+    kidney_schedule=[KF_DISEASE]*N_STEPS,
+    stiffness_schedule=[K1_DISEASE]*N_STEPS,
+    inflammation_schedule=[INFL]*N_STEPS,
+    diabetes_schedule=[DIAB]*N_STEPS,
     use_ode=True,
 )
+_log_run("research_figures/disease", DISEASE_PARAMS, disease)
 
-steps = np.arange(1, N_STEPS + 1)
+# x-axis in years
+years = np.arange(1, N_STEPS + 1) / (STEPS_PER_MONTH * 12)
+steps = years  # alias used throughout figure code below
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -101,7 +139,7 @@ for ax, (key, title, unit, ylim, hist_key) in zip(axes1.flat, panels):
     ax.plot(steps, d_vals, '-s', color=DISEASE_COLOR, ms=3, lw=1.5, label='Disease')
     ax.set_title(title)
     ax.set_ylabel(unit)
-    ax.set_xlabel('Coupling Step')
+    ax.set_xlabel('Time (years)')
     ax.set_ylim(ylim)
     ax.legend(loc='best')
     ax.grid(True, alpha=0.3)
@@ -211,14 +249,14 @@ ax_k2h_gfr.grid(True, alpha=0.3)
 # Row 2, col 3: Kidney outputs
 ax_kidney = fig2.add_subplot(gs[2, 3])
 ax_kidney.plot(steps, [float(v) for v in disease['Na_excr']], '-o', color=MSG_K2H_COLOR, ms=3, lw=1.5, label='Na excr')
-ax_kidney.axhline(137, color='gray', ls='--', lw=0.8, label='Na intake')
+ax_kidney.axhline(142, color='gray', ls='--', lw=0.8, label='Na intake')
 ax_kidney.set_title('Renal Function')
 ax_kidney.set_ylabel('mEq/day')
 ax_kidney.legend(loc='best')
 ax_kidney.grid(True, alpha=0.3)
 
 for ax in fig2.axes:
-    ax.set_xlabel('Coupling Step')
+    ax.set_xlabel('Time (years)')
 
 fig2.savefig('plots/fig2_message_passing.png')
 print("  Saved: plots/fig2_message_passing.png")
@@ -286,7 +324,7 @@ ax.legend(lines1+lines2, labels1+labels2, loc='best')
 ax.grid(True, alpha=0.3)
 
 for ax in axes3.flat:
-    ax.set_xlabel('Coupling Step')
+    ax.set_xlabel('Time (years)')
 
 fig3.tight_layout(rect=[0, 0, 1, 0.93])
 fig3.savefig('plots/fig3_inflammatory_mediators.png')
@@ -300,10 +338,11 @@ fig4, (ax_lv, ax_rv) = plt.subplots(1, 2, figsize=(10, 4.5))
 fig4.suptitle('Figure 4: Pressure-Volume Loops — Early vs Late Cardiorenal Disease',
               fontweight='bold', fontsize=12)
 
+yr4_idx = 4 * STEPS_PER_MONTH * 12   # step index at year 4
 for idx, label, color, ls in [
-    (0, f'Step 1 (Sf={sf_sched[0]:.2f}, Kf={kf_sched[0]:.2f})', HEALTHY_COLOR, '-'),
-    (5, f'Step 6 (Sf={sf_sched[5]:.2f}, Kf={kf_sched[5]:.2f})', '#f39c12', '--'),
-    (-1, f'Step {N_STEPS} (Sf={sf_sched[-1]:.2f}, Kf={kf_sched[-1]:.2f})', DISEASE_COLOR, '-'),
+    (0,        f'Year 0  (Sf={SF_DISEASE:.2f}, Kf={KF_DISEASE:.2f}, ODE start)', HEALTHY_COLOR, '-'),
+    (yr4_idx,  f'Year 4  (Sf={SF_DISEASE:.2f}, Kf={KF_DISEASE:.2f}, ODE mid)',   '#f39c12',     '--'),
+    (-1,       f'Year 8  (Sf={SF_DISEASE:.2f}, Kf={KF_DISEASE:.2f}, ODE end)',   DISEASE_COLOR, '-'),
 ]:
     v_lv, p_lv = disease['PV_LV'][idx]
     v_rv, p_rv = disease['PV_RV'][idx]
