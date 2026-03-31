@@ -18,8 +18,9 @@ This module implements the computational framework coupling:
 
 Message protocol (Algorithm 1, Steps 5-8):
     Heart  -> Kidney :  MAP, CO, central venous pressure (CVP)
-    Kidney -> Heart  :  total blood volume (V_blood), systemic vascular
-                        resistance ratio (SVR_ratio)
+    Kidney -> Heart  :  total blood volume (V_blood) only; SVR_ratio is
+                        fixed at 1.0 (resistance feedback disabled to
+                        prevent positive feedback loop)
 
 Deterioration knobs (Section 3.3):
     Cardiac : Sf_act_scale -- scales Patch['Sf_act'] on LV + SV
@@ -61,7 +62,6 @@ M3_TO_ML   = 1e6             # 1 m^3 = 1,000,000 mL
 ML_TO_M3   = 1e-6            # 1 mL  = 1e-6 m^3
 M3S_TO_LMIN = 6e4            # 1 m^3/s = 60,000 mL/min = 60 L/min
 
-
 # =========================================================================
 # PART 1 -- CircAdapt Heart Wrapper  (Section 3.1)
 # =========================================================================
@@ -95,7 +95,7 @@ class CircAdaptHeartModel:
       - apply_deterioration()          -> Apply disease: scales Sf_act (contractility)
       - apply_stiffness()              -> Apply disease: scales k1 (passive diastolic stiffness)
       - apply_inflammatory_modifiers() -> Apply inflammatory modifiers: adjusts ArtVen p0 (SVR), Tube0D k (arterial stiffness), k1
-      - apply_kidney_feedback()        -> Kidney to Heart: sets V_blood and resistance ratio R_r from renal model
+      - apply_kidney_feedback()        -> Kidney to Heart: sets V_blood (via Guyton 0.33 stressed fraction); SVR_ratio fixed at 1.0 (no resistance feedback)
       - run_to_steady_state()          -> CircAdapt solver: runs multiple cardiac cycles until stable, extracts MAP, CO, CVP, EF, SV
 
     Section 3.1 describes how CircAdapt parameters map to pathophysiology:
@@ -132,6 +132,7 @@ class CircAdaptHeartModel:
         # flow is computed as q = sign(dp) * q0 * (|dp|/p0)^k, so p0
         # effectively sets the resistance operating point. Scaling p0
         # is how we implement SVR changes from kidney feedback (Section 3.3).
+        
         self._ref_ArtVen_p0 = float(self.model['ArtVen']['p0']['CiSy'])    # Systemic ArtVen p0 [Pa]
 
         # Cache the healthy reference for arterial wall stiffness (Tube0D k)
@@ -237,10 +238,11 @@ class CircAdaptHeartModel:
         # This check ensures backward compatibility with CircAdapt versions
         # that may not expose the k1 parameter.
         if self._ref_k1_lv is not None:
-            # Scale LV free wall passive stiffness relative to healthy reference
-            self.model['Patch']['k1']['pLv0'] = self._ref_k1_lv * k1_scale
+            # Scale LV free wall passive stiffness: input schedule × ODE inflammatory factor
+            # (k1_ref * k1_scale * passive_k1_factor, Section 3.1 Eq. 2)
+            self.model['Patch']['k1']['pLv0'] = self._ref_k1_lv * k1_scale * self._inflammatory_k1_factor
             # Scale septal passive stiffness identically
-            self.model['Patch']['k1']['pSv0'] = self._ref_k1_sv * k1_scale
+            self.model['Patch']['k1']['pSv0'] = self._ref_k1_sv * k1_scale * self._inflammatory_k1_factor
 
     # ── Accept kidney feedback (Algorithm 1, Step 8) ─────────────────────
     def apply_kidney_feedback(self, V_blood_mL: float, SVR_ratio: float):
