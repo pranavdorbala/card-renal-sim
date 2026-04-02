@@ -493,7 +493,7 @@ class CardiorenalAgent:
 
         # Start the wall-clock timer for elapsed_seconds in the result.
         t0 = time.time()
-
+ 
         # ─── Build the initial conversation ──────────────────────────────
         # The conversation is a list of message dicts following the OpenAI
         # chat completion format. We start with:
