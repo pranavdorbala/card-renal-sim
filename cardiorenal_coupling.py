@@ -56,11 +56,7 @@ from circadapt import VanOsta2024
 # CircAdapt internally uses SI units (Pa, m^3, s). Our renal model and
 # clinical outputs use mmHg, mL, and minutes. These constants bridge the
 # two unit systems throughout the coupling interface.
-PA_TO_MMHG = 7.5e-3          # 1 Pa  = 7.5e-3 mmHg  (inverse of 133.322)
-MMHG_TO_PA = 133.322         # 1 mmHg = 133.322 Pa
-M3_TO_ML   = 1e6             # 1 m^3 = 1,000,000 mL
-ML_TO_M3   = 1e-6            # 1 mL  = 1e-6 m^3
-M3S_TO_LMIN = 6e4            # 1 m^3/s = 60,000 mL/min = 60 L/min
+
 
 # =========================================================================
 # PART 1 -- CircAdapt Heart Wrapper  (Section 3.1)
